@@ -467,10 +467,15 @@ class SecurityScanner:
         self.delay = delay
         self.respect_waf = respect_waf
         self.waf_detected: bool = False
+        self.rate_limit_detected: bool = False
+        self.rate_limit_delay: float = 0.0
         self.findings: list[dict[str, Any]] = []
         self.test_history: list[dict[str, Any]] = []
         self.attack_surface: dict[str, Any] = {}
         self.defenses_detected: list[str] = []
+        self.captured_credentials: list[dict[str, str]] = []
+        self.captured_tokens: dict[str, str] = {}
+        self.captured_cookies: dict[str, str] = {}
         self.db = db or ScannerDB()
         self._load_state()
 
@@ -504,10 +509,70 @@ class SecurityScanner:
             json.dump(state, f, indent=2)
 
     def _effective_delay(self) -> float:
-        """Compute effective delay, doubling if WAF was detected and respect_waf is on."""
+        """Compute effective delay, accounting for WAF and rate limits."""
+        delay = self.delay
         if self.respect_waf and self.waf_detected:
-            return self.delay * 2
-        return self.delay
+            delay *= 2
+        if self.rate_limit_detected and self.rate_limit_delay > 0:
+            delay = max(delay, self.rate_limit_delay)
+        return delay
+
+    def adapt_to_defenses(self, defenses: dict[str, Any]) -> None:
+        """Adapt scanner behavior based on detected defenses."""
+        if defenses.get("waf"):
+            self.waf_detected = True
+            self.defenses_detected.append(defenses["waf"])
+
+        rate_limit = defenses.get("rate_limit", "")
+        if rate_limit and "429" in str(rate_limit):
+            self.rate_limit_detected = True
+            import re as _re
+
+            match = _re.search(r"after (\d+) requests in ([\d.]+)s", str(rate_limit))
+            if match:
+                count = int(match.group(1))
+                seconds = float(match.group(2))
+                self.rate_limit_delay = (seconds / count) * 1.5
+
+    def capture_credential(self, username: str, password: str, source: str = "") -> None:
+        """Record a captured credential for reuse."""
+        cred = {"username": username, "password": password, "source": source}
+        if cred not in self.captured_credentials:
+            self.captured_credentials.append(cred)
+            print(f"[+] Credential captured: {username} (source: {source})")
+
+    def capture_token(self, name: str, token: str, source: str = "") -> None:
+        """Record a captured token (JWT, API key, session token)."""
+        self.captured_tokens[name] = token
+        print(f"[+] Token captured: {name} (source: {source})")
+
+    def capture_cookie(self, name: str, value: str) -> None:
+        """Record a captured cookie and inject into session."""
+        self.captured_cookies[name] = value
+        self.session.cookies.set(name, value)
+        print(f"[+] Cookie captured: {name}")
+
+    def try_captured_credentials(
+        self, login_url: str, method: str = "POST"
+    ) -> dict[str, Any] | None:
+        """Try all captured credentials against a login endpoint."""
+        username_fields = ["username", "user", "email", "login", "name"]
+        password_fields = ["password", "pass", "passwd", "pwd"]
+
+        for cred in self.captured_credentials:
+            for uf in username_fields:
+                for pf in password_fields:
+                    data = {uf: cred["username"], pf: cred["password"]}
+                    r = self._make_request(method, login_url, data=data)
+                    if r.status_code in (200, 302) and "error" not in r.text.lower()[:200]:
+                        print(f"[!] Login successful: {cred['username']} via {uf}/{pf}")
+                        return {
+                            "username": cred["username"],
+                            "password": cred["password"],
+                            "url": login_url,
+                            "fields": (uf, pf),
+                        }
+        return None
 
     def _make_request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         """Make HTTP request with timing, retry on transient failure, and pacing."""

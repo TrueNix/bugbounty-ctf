@@ -33,6 +33,7 @@ from bugbounty_ctf.agents import (
     ResearchAgent,
     create_agent,
 )
+from bugbounty_ctf.aws_exploit import AWSExploiter, exploit_aws_credentials
 from bugbounty_ctf.engine import (
     DiffAnalysis,
     ResponseDiff,
@@ -49,6 +50,7 @@ from bugbounty_ctf.engine import (
     ip_to_hex,
     ip_to_octal,
 )
+from bugbounty_ctf.flag_hunter import FlagHunter, hunt_flags
 from bugbounty_ctf.knowledge import KnowledgeBase
 from bugbounty_ctf.orchestrator import Orchestrator, OrchestratorReport, PhaseResult
 from bugbounty_ctf.quick_tests import (
@@ -62,14 +64,17 @@ from bugbounty_ctf.quick_tests import (
     test_ssti,
 )
 from bugbounty_ctf.skill_runner import PhaseGuidance, SkillOrchestrator
+from bugbounty_ctf.ssrf_pivot import SSRFPivot
 
 __all__ = [
+    "AWSExploiter",
     "AgentContext",
     "AgentResult",
     "BaseAgent",
     "ChainContext",
     "DiffAnalysis",
     "ExploitAgent",
+    "FlagHunter",
     "FuzzAgent",
     "KnowledgeBase",
     "Orchestrator",
@@ -79,6 +84,7 @@ __all__ = [
     "ReconAgent",
     "ResearchAgent",
     "ResponseDiff",
+    "SSRFPivot",
     "ScannerDB",
     "SecurityScanner",
     "SkillOrchestrator",
@@ -91,11 +97,13 @@ __all__ = [
     "detect_defenses",
     "detect_ssrf_filter",
     "enumerate_aws_metadata",
+    "exploit_aws_credentials",
     "forge_jwt_alg_none",
     "forge_jwt_hs256",
     "generate_aws_presigned_url",
     "generate_ssrf_bypass_ips",
     "get_aws_credentials",
+    "hunt_flags",
     "ip_to_decimal",
     "ip_to_hex",
     "ip_to_octal",
