@@ -50,8 +50,11 @@ from bugbounty_ctf.engine import (
     ip_to_hex,
     ip_to_octal,
 )
+from bugbounty_ctf.failures import FailureType, RequestFailure, handle_failure
 from bugbounty_ctf.flag_hunter import FlagHunter, hunt_flags
+from bugbounty_ctf.hypothesis import Hypothesis, HypothesisEngine
 from bugbounty_ctf.knowledge import KnowledgeBase
+from bugbounty_ctf.observations import Observation, ObservationStore, recommend_next_test
 from bugbounty_ctf.orchestrator import Orchestrator, OrchestratorReport, PhaseResult
 from bugbounty_ctf.quick_tests import (
     map_surface,
@@ -74,14 +77,20 @@ __all__ = [
     "ChainContext",
     "DiffAnalysis",
     "ExploitAgent",
+    "FailureType",
     "FlagHunter",
     "FuzzAgent",
+    "Hypothesis",
+    "HypothesisEngine",
     "KnowledgeBase",
+    "Observation",
+    "ObservationStore",
     "Orchestrator",
     "OrchestratorReport",
     "PhaseGuidance",
     "PhaseResult",
     "ReconAgent",
+    "RequestFailure",
     "ResearchAgent",
     "ResponseDiff",
     "SSRFPivot",
@@ -103,11 +112,13 @@ __all__ = [
     "generate_aws_presigned_url",
     "generate_ssrf_bypass_ips",
     "get_aws_credentials",
+    "handle_failure",
     "hunt_flags",
     "ip_to_decimal",
     "ip_to_hex",
     "ip_to_octal",
     "map_surface",
+    "recommend_next_test",
     "save_report",
     "test_command_injection",
     "test_file_upload",
