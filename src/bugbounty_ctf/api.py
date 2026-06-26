@@ -34,6 +34,7 @@ from bugbounty_ctf.agents import (
     create_agent,
 )
 from bugbounty_ctf.aws_exploit import AWSExploiter, exploit_aws_credentials
+from bugbounty_ctf.crypto import CryptoToolkit
 from bugbounty_ctf.engine import (
     DiffAnalysis,
     ResponseDiff,
@@ -56,6 +57,7 @@ from bugbounty_ctf.hypothesis import Hypothesis, HypothesisEngine
 from bugbounty_ctf.knowledge import KnowledgeBase
 from bugbounty_ctf.observations import Observation, ObservationStore, recommend_next_test
 from bugbounty_ctf.orchestrator import Orchestrator, OrchestratorReport, PhaseResult
+from bugbounty_ctf.post_exploit import PostExploit, post_exploit_enum
 from bugbounty_ctf.quick_tests import (
     map_surface,
     test_command_injection,
@@ -75,6 +77,7 @@ __all__ = [
     "AgentResult",
     "BaseAgent",
     "ChainContext",
+    "CryptoToolkit",
     "DiffAnalysis",
     "ExploitAgent",
     "FailureType",
@@ -89,6 +92,7 @@ __all__ = [
     "OrchestratorReport",
     "PhaseGuidance",
     "PhaseResult",
+    "PostExploit",
     "ReconAgent",
     "RequestFailure",
     "ResearchAgent",
@@ -118,6 +122,7 @@ __all__ = [
     "ip_to_hex",
     "ip_to_octal",
     "map_surface",
+    "post_exploit_enum",
     "recommend_next_test",
     "save_report",
     "test_command_injection",
