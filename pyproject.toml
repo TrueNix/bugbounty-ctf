@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bugbounty-ctf"
+version = "4.0.0"
+description = "CTF challenges and authorized bug bounty hunting — methodology, payload library, and automated testing engine"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "TrueNix" }]
+keywords = ["ctf", "bug-bounty", "security", "pentesting", "exploit", "web-hacking", "vulnerability-research"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "requests>=2.28",
+]
+
+[project.optional-dependencies]
+pwn = ["pwntools>=4.10"]
+yaml = ["pyyaml>=6.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "responses>=0.24",
+    "ruff>=0.1",
+    "mypy>=1.7",
+]
+
+[project.urls]
+Homepage = "https://github.com/TrueNix/bugbounty-ctf"
+Repository = "https://github.com/TrueNix/bugbounty-ctf"
+Issues = "https://github.com/TrueNix/bugbounty-ctf/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bugbounty_ctf"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["E501"]  # line length handled by formatter
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]  # asserts ok in tests
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true
+files = ["src/bugbounty_ctf"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+norecursedirs = ["src", "build", "dist", ".git", "references", "templates"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+markers = [
+    "unit: unit tests with mocked HTTP",
+    "integration: tests that hit real endpoints (deselect by default)",
+]
+
+[tool.coverage.run]
+source = ["src/bugbounty_ctf"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 45

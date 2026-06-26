@@ -1,7 +1,7 @@
 ---
 name: bugbounty-ctf
 description: "Use when solving CTF challenges, practicing bug bounty hunting, analyzing vulnerabilities, writing exploit code, or performing authorized security assessments. Covers web vulns, crypto, pwn, reverse engineering, forensics, OSINT, and exploit development methodology."
-version: 3.0.0
+version: 7.0.0
 author: Hermes Agent
 license: MIT
 platforms: [linux, macos]
@@ -50,8 +50,7 @@ If source code is available, **you still test like you don't have it**. Reading 
 Before diving in, let the tooling tell you what you're dealing with:
 
 ```python
-exec(open(os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
-    "skills/red-teaming/bugbounty-ctf/references/ctf_helper.py")).read())
+exec(open("references/ctf_helper.py").read())
 
 result = analyze_challenge("/path/to/challenge_file")
 print(result["category"])       # "pwn/rev", "crypto", "forensics"
@@ -68,46 +67,45 @@ This runs `file`, `strings`, pattern matching for flags/base64/hex, and extensio
 Before manual testing, load the automated security testing engine:
 
 ```python
-# Load the core engine
-exec(open(os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
-    "skills/red-teaming/bugbounty-ctf/scripts/security_engine.py")).read())
+from bugbounty_ctf import SecurityScanner
+from bugbounty_ctf.api import (
+    test_login_sqli, test_ssti, test_command_injection, test_path_traversal,
+    test_nosqli, test_ldap_injection, test_ssrf, test_xss, test_idor,
+    test_graphql_alias_batch, map_surface,
+    detect_defenses, test_race_condition, test_xxe,
+    test_pickle_deserialization, test_yaml_deserialization,
+    test_jwt_attacks, test_file_upload,
+    decode_jwt, forge_jwt_alg_none, forge_jwt_hs256,
+    ChainContext, generate_report, save_report,
+)
 
-# Load quick test wrappers
-exec(open(os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
-    "skills/red-teaming/bugbounty-ctf/scripts/quick_test.py")).read())
-
-# Load payload library
-exec(open(os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
-    "skills/red-teaming/bugbounty-ctf/references/payload-library.md")).read())
+scanner = SecurityScanner("http://target/")
 ```
 
 **Quick testing functions available after loading:**
-- `test_login_sqli(url)` — Test login form for SQL injection
-- `test_ssti(url, method, param_name)` — Test for SSTI
-- `test_command_injection(url, method, param_name)` — Test for command injection
-- `test_path_traversal(url, method, param_name)` — Test for path traversal
-- `test_nosqli(url)` — Test JSON login for NoSQL injection
-- `test_ldap_injection(url)` — Test for LDAP injection
-- `test_ssrf(url, method, param_name)` — Test for SSRF
-- `map_surface(base_url)` — Map attack surface (forms, links, tech)
+- `test_login_sqli(url, scanner=scanner)` — Test login form for SQL injection
+- `test_ssti(url, method, param_name, scanner=scanner)` — Test for SSTI
+- `test_command_injection(url, method, param_name, scanner=scanner)` — Test for command injection
+- `test_path_traversal(url, method, param_name, scanner=scanner)` — Test for path traversal
+- `test_nosqli(url, scanner=scanner)` — Test JSON login for NoSQL injection
+- `test_ldap_injection(url, scanner=scanner)` — Test for LDAP injection
+- `test_ssrf(url, method, param_name, scanner=scanner)` — Test for SSRF
+- `test_xss(url, method, param_name, scanner=scanner)` — Test for XSS with 8-level filter-bypass escalation
+- `test_idor(url_template, scanner=scanner)` — Test for IDOR (sequential ID probing)
+- `test_graphql_alias_batch(url, query_template, scanner=scanner)` — GraphQL alias-batch brute force
+- `map_surface(base_url, scanner=scanner)` — Map attack surface (forms, links, tech)
 
-**Advanced functions (load `scripts/advanced_tests.py` for these):**
-- `detect_defenses(base_url)` — Fingerprint WAF, rate limit, input filters, missing security headers
+**Advanced functions:**
+- `detect_defenses(base_url, scanner=scanner)` — Fingerprint WAF, rate limit, input filters, missing security headers
 - `test_race_condition(url, data=..., workers=30)` — Concurrent request race testing with success counting
-- `test_xxe(url)` — XXE with multiple entity payloads (file://, php://filter, parameter entities)
-- `test_pickle_deserialization(url, param_name)` — Python pickle RCE probe (uses benign marker file, not real RCE)
-- `test_yaml_deserialization(url, param_name)` — PyYAML unsafe_load probe
-- `test_jwt_attacks(url, token)` — JWT alg=none, weak HS256 secret bruteforce
+- `test_xxe(url, scanner=scanner)` — XXE with multiple entity payloads (file://, php://filter, parameter entities)
+- `test_pickle_deserialization(url, param_name, scanner=scanner)` — Python pickle RCE probe (uses benign marker file, not real RCE)
+- `test_yaml_deserialization(url, param_name, scanner=scanner)` — PyYAML unsafe_load probe
+- `test_jwt_attacks(url, token, scanner=scanner)` — JWT alg=none, weak HS256 secret bruteforce
 - `decode_jwt(token)` / `forge_jwt_alg_none(payload)` / `forge_jwt_hs256(payload, secret)` — JWT utilities
-- `test_file_upload(url, file_field)` — Upload bypass variants (extension, magic bytes, double-ext, case)
+- `test_file_upload(url, file_field, scanner=scanner)` — Upload bypass variants + RCE verification
 - `ChainContext()` — Carry tokens/credentials/findings across exploits; `.try_endpoints_with_token()` auto-tests captured tokens against admin endpoints
 - `generate_report(scanner)` / `save_report(scanner)` — Markdown or JSON severity-ranked reports
-
-**Loading the advanced module:**
-```python
-exec(open(os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
-    "skills/red-teaming/bugbounty-ctf/scripts/advanced_tests.py")).read())
-```
 
 **Direct engine usage:**
 ```python
@@ -121,6 +119,65 @@ results = scanner.run_payload_set(baseline, "POST", "http://target/login",
 # Get findings
 print(scanner.get_summary())
 ```
+
+### Knowledge Base
+
+Query the reference methodology docs before testing to find relevant exploit paths:
+
+```python
+from bugbounty_ctf.knowledge import KnowledgeBase
+
+kb = KnowledgeBase()
+
+# Full-text search across all reference docs
+results = kb.search("nginx-ui authentication bypass")
+
+# Get methodology suggestions based on detected tech
+suggestions = kb.suggest_methodology(["nginx", "Flask/Python (Werkzeug)", "Jinja2"])
+for s in suggestions:
+    print(f"  {s['filename']} — {s['section']}")
+    print(f"  {s['snippet']}")
+```
+
+### Multi-Agent Skill Orchestrator
+
+When running as a Hermes skill, use the SkillOrchestrator to guide testing
+through 4 phases. The Hermes agent (you) IS the reasoning engine — no
+subprocess spawning needed. The orchestrator provides phase guidance with
+RAG context and scanner state, and you execute the instructions using
+the toolkit functions:
+
+```python
+from bugbounty_ctf.skill_runner import SkillOrchestrator
+
+runner = SkillOrchestrator("http://target/")
+
+# Phase 1: Recon — map the attack surface
+guidance = runner.get_recon_guidance()
+# Execute the guidance instructions using scanner.map_surface(), detect_defenses(), etc.
+
+# Phase 2: Research — query the knowledge base
+guidance = runner.get_research_guidance()
+# The guidance includes RAG results — use them to prioritize tests
+
+# Phase 3: Fuzz — test payloads
+guidance = runner.get_fuzz_guidance()
+# Execute scan_endpoint() and test_ssrf() on discovered endpoints
+
+# Phase 4: Exploit — chain findings
+guidance = runner.get_exploit_guidance()
+# Chain confirmed vulnerabilities into exploit paths
+
+# Collect final results
+results = runner.collect_results()
+runner.save_results()
+```
+
+The orchestrator automatically:
+- Queries the FTS5 knowledge base for methodology at each phase
+- Injects scanner state (findings, surface, WAF status) into guidance
+- Tracks findings in SQLite (ScannerDB) for cross-target analysis
+- Runs SSRF + AWS metadata extraction when URL parameters are found
 
 ### Phase 1: Reconnaissance (Map the surface)
 
@@ -205,8 +262,7 @@ Once you find a vulnerability, use it to access more surface:
 ### Automated Recon Script
 
 ```python
-exec(open(os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
-    "skills/red-teaming/bugbounty-ctf/scripts/web_recon.py")).read())
+from bugbounty_ctf.web_recon import recon_target, recon_report
 
 result = recon_target("http://target.com", quick=True)
 print(recon_report(result))
@@ -385,8 +441,7 @@ GET /render → check if "49" appears in rendered output
 ### Auto-Decoding Workflow
 
 ```python
-exec(open(os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
-    "skills/red-teaming/bugbounty-ctf/references/ctf_helper.py")).read())
+exec(open("references/ctf_helper.py").read())
 
 result = decode_all_encodings("dGVzdCBmbGFnIHtmbGFnX3Rlc3R9")
 print(result["flag_matches"])
@@ -530,9 +585,12 @@ Many CTF labs are **vulnerability identification exercises**, not flag-capture:
 
 | File | Use when |
 |:-----|:---------|
-| `scripts/security_engine.py` | Core testing engine: payload runner, response diff, attack surface mapping, state persistence |
-| `scripts/quick_test.py` | Quick test wrappers: one-liners for SQLi, SSTI, CMDi, path traversal, NoSQLi, LDAP, SSRF |
-| `scripts/advanced_tests.py` | Advanced: WAF/defense detection, race conditions, XXE, deserialization, JWT, file upload, chain exploitation, reporting |
+| `bugbounty_ctf/engine.py` | Core testing engine: payload runner, response diff, attack surface mapping, state persistence |
+| `bugbounty_ctf/quick_tests.py` | Quick test wrappers: one-liners for SQLi, SSTI, CMDi, path traversal, NoSQLi, LDAP, SSRF |
+| `bugbounty_ctf/advanced_tests.py` | Advanced: WAF/defense detection, race conditions, XXE, deserialization, JWT, file upload, XSS, IDOR, GraphQL, chain exploitation, reporting |
+| `bugbounty_ctf/web_recon.py` | Automated web target recon (shell-injection-safe) |
+| `bugbounty_ctf/callback_listener.py` | HTTP listener for XSS/SSRF callback testing |
+| `bugbounty_ctf/alpine_pty_extract.py` | SUID binary file extraction via PTY |
 | `references/payload-library.md` | Organized payload sets by vulnerability class with Python dicts |
 | `references/escalate-ctf-walkthrough.md` | Full SQLi → webshell → SUID → docker root chain |
 | `references/advanced-escalation.md` | SUID PTY, PAM scripts, Docker escapes |
@@ -544,11 +602,12 @@ Many CTF labs are **vulnerability identification exercises**, not flag-capture:
 | `references/sqlite-sqli-deep-dive.md` | pragma_*, sqlite_dbpage, FTS3 tokenizer |
 | `references/htb-recon-methodology.md` | HTB recon: machine ID, GitHub source discovery |
 | `references/aclabs-platform-patterns.md` | ACLabs.pro patterns, vuln-ID vs flag-capture |
+| `references/aclabs-drtbp-architecture.md` | DRTBP challenge architecture |
+| `references/aclabs-source-exploitation.md` | ACLabs source exploitation methodology |
 | `references/nginx-ui-exploitation.md` | nginx-ui: unauthenticated backup, RSA login |
 | `references/nginx-ui-login-encryption.md` | nginx-ui RSA login workflow |
+| `references/nginx-ui-backdoor.md` | nginx-ui backdoor analysis |
 | `references/recreating-ctf-labs-locally.md` | Rebuild CTF target as Docker Compose |
 | `templates/exploit_template.py` | Pwntools exploit skeleton |
 | `templates/bug-bounty-report.md` | Report template for bounty submissions |
-| `scripts/web_recon.py` | Automated web target recon |
-| `scripts/callback_listener.py` | HTTP listener for XSS/SSRF callback testing |
 | `references/ctf_helper.py` | `analyze_challenge()`, encoding detection, XOR, hash cracking |
