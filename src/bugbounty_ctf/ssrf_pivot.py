@@ -236,7 +236,13 @@ class SSRFPivot:
                 url = f"http://{service.host}:{service.port}{path}"
                 content = self._ssrf_fetch(url)
 
-                if content and "Not Found" not in content and "404" not in content[:20]:
+                if (
+                    content
+                    and "Not Found" not in content
+                    and "404" not in content[:20]
+                    and "301" not in content[:20]
+                    and "Moved Permanently" not in content[:50]
+                ):
                     service.endpoints.append(path)
 
                     flags = self._extract_flags(content)
