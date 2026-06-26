@@ -41,7 +41,9 @@ class TestXssPayloadLadder:
 class TestXssDetection:
     @responses.activate
     def test_xss_confirmed_when_payload_reflected_unescaped(self) -> None:
-        def reflect_callback(request: requests.PreparedRequest) -> tuple[int, dict[str, str], bytes]:
+        def reflect_callback(
+            request: requests.PreparedRequest,
+        ) -> tuple[int, dict[str, str], bytes]:
             qs = parse_qs(urlparse(request.url).query)
             q_val = qs.get("q", [""])[0]
             body = f"<html>Result: {q_val}</html>"

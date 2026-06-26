@@ -21,6 +21,7 @@ class TestBaselineContentComparison:
     @responses.activate
     def test_pattern_in_baseline_is_not_flagged(self) -> None:
         """If baseline already contains 'uid=1000', a test with the same should NOT flag command_output."""
+
         class FakeResp:
             def __init__(self, text: str, status: int = 200) -> None:
                 self.text = text

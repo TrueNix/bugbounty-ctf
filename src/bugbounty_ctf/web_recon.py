@@ -26,9 +26,7 @@ def run_cmd(args: list[str], timeout: int = 30) -> tuple[str, str, int]:
         (stdout, stderr, returncode)
     """
     try:
-        result = subprocess.run(
-            args, capture_output=True, text=True, timeout=timeout, check=False
-        )
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
         return result.stdout.strip(), result.stderr.strip(), result.returncode
     except subprocess.TimeoutExpired:
         return "", "[TIMEOUT]", -1
@@ -119,10 +117,21 @@ def recon_target(url: str, quick: bool = False) -> dict[str, Any]:
     # 3. Common paths
     print("[*] Checking common paths")
     common_paths = [
-        "/admin", "/login", "/api", "/api/v1", "/graphql",
-        "/.env", "/config.php", "/wp-admin", "/phpinfo.php",
-        "/server-status", "/actuator", "/swagger.json",
-        "/.git/config", "/backup.sql", "/debug",
+        "/admin",
+        "/login",
+        "/api",
+        "/api/v1",
+        "/graphql",
+        "/.env",
+        "/config.php",
+        "/wp-admin",
+        "/phpinfo.php",
+        "/server-status",
+        "/actuator",
+        "/swagger.json",
+        "/.git/config",
+        "/backup.sql",
+        "/debug",
     ]
     found_paths: list[dict[str, str]] = []
     for path in common_paths:

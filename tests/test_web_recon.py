@@ -63,9 +63,7 @@ class TestReconReport:
                     "present": ["x-frame-options"],
                     "missing": ["CSP missing"],
                 },
-                "quick_vulns": [
-                    {"type": "Directory Listing", "path": "/", "severity": "Low"}
-                ],
+                "quick_vulns": [{"type": "Directory Listing", "path": "/", "severity": "Low"}],
             },
             "summary": {
                 "technology": {"server": "nginx"},

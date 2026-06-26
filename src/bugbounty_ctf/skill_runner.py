@@ -99,11 +99,13 @@ class SkillOrchestrator:
             if not isinstance(surface, dict):
                 continue
             for f in surface.get("forms", []):
-                all_forms.append({
-                    "action": f.get("action"),
-                    "method": f.get("method"),
-                    "inputs": [i.get("name") for i in f.get("inputs", [])],
-                })
+                all_forms.append(
+                    {
+                        "action": f.get("action"),
+                        "method": f.get("method"),
+                        "inputs": [i.get("name") for i in f.get("inputs", [])],
+                    }
+                )
             all_links.extend(surface.get("links", []))
             all_tech.extend(surface.get("tech_hints", []))
 
@@ -146,8 +148,7 @@ class SkillOrchestrator:
         else:
             methodology = self.kb.search("web vulnerability testing")
         rag_lines = [
-            f"{m['filename']} > {m['section']}: {m['snippet'][:120]}"
-            for m in methodology[:10]
+            f"{m['filename']} > {m['section']}: {m['snippet'][:120]}" for m in methodology[:10]
         ]
         return PhaseGuidance(
             phase="research",

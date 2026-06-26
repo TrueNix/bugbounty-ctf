@@ -57,7 +57,9 @@ class TestSuggestMethodology:
     def test_suggest_for_flask_jinja(self, temp_kb: KnowledgeBase) -> None:
         results = temp_kb.suggest_methodology(["Flask/Python (Werkzeug)", "Jinja2 template engine"])
         assert len(results) > 0
-        assert any("jinja" in r["matched_keywords"] or "flask" in r["matched_keywords"] for r in results)
+        assert any(
+            "jinja" in r["matched_keywords"] or "flask" in r["matched_keywords"] for r in results
+        )
 
     def test_suggest_for_nginx(self, temp_kb: KnowledgeBase) -> None:
         results = temp_kb.suggest_methodology(["nginx"])

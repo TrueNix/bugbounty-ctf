@@ -45,7 +45,10 @@ def _split_into_sections(content: str, max_section_len: int = 2000) -> list[dict
     merged: list[dict[str, str]] = []
     for s in sections:
         if len(s["body"]) > max_section_len:
-            chunks = [s["body"][i:i + max_section_len] for i in range(0, len(s["body"]), max_section_len)]
+            chunks = [
+                s["body"][i : i + max_section_len]
+                for i in range(0, len(s["body"]), max_section_len)
+            ]
             for i, chunk in enumerate(chunks):
                 merged.append({"header": f"{s['header']} (part {i + 1})", "body": chunk})
         else:
@@ -81,7 +84,9 @@ class KnowledgeBase:
         "Jinja2": ["jinja", "jinja2", "{{", "template"],
     }
 
-    def __init__(self, db_path: str | None = None, references_dir: str | Path | None = None) -> None:
+    def __init__(
+        self, db_path: str | None = None, references_dir: str | Path | None = None
+    ) -> None:
         self.db_path = db_path or _default_db_path()
         self.references_dir = str(references_dir or self._find_references_dir())
         self._conn: sqlite3.Connection | None = None
@@ -192,8 +197,11 @@ class KnowledgeBase:
         if match:
             tag_str = match.group(1)
             tags = [t.strip().strip('"').strip("'") for t in tag_str.split(",")]
-        keywords = re.findall(r"\b(sqli|xss|ssti|ssrf|xxe|idor|jwt|race|deserialization|upload|docker|suid|escalation|nginx|flask|django|php|sqlite|mysql|graphql|ldap|nosql)\b",
-                              content[:1000], re.IGNORECASE)
+        keywords = re.findall(
+            r"\b(sqli|xss|ssti|ssrf|xxe|idor|jwt|race|deserialization|upload|docker|suid|escalation|nginx|flask|django|php|sqlite|mysql|graphql|ldap|nosql)\b",
+            content[:1000],
+            re.IGNORECASE,
+        )
         tags.extend(keywords)
         return ", ".join(set(tags))
 

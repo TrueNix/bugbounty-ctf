@@ -38,14 +38,22 @@ class TestLoginSqli:
             "http://target/login",
             body="Login failed",
             status=200,
-            match=[responses.matchers.urlencoded_params_matcher({"username": "test", "password": "test"})],
+            match=[
+                responses.matchers.urlencoded_params_matcher(
+                    {"username": "test", "password": "test"}
+                )
+            ],
         )
         responses.add(
             responses.POST,
             "http://target/login",
             body="SQL syntax error near 'OR 1=1",
             status=500,
-            match=[responses.matchers.urlencoded_params_matcher({"username": "'", "password": "anything"})],
+            match=[
+                responses.matchers.urlencoded_params_matcher(
+                    {"username": "'", "password": "anything"}
+                )
+            ],
         )
 
         results = run_login_sqli("http://target/login")
@@ -174,7 +182,11 @@ class TestSsrf:
             "http://target/fetch",
             body="AccessKeyId: AKIAIOSFODNN7EXAMPLE",
             status=200,
-            match=[responses.matchers.urlencoded_params_matcher({"url": "http://169.254.169.254/latest/meta-data/"})],
+            match=[
+                responses.matchers.urlencoded_params_matcher(
+                    {"url": "http://169.254.169.254/latest/meta-data/"}
+                )
+            ],
         )
 
         results = run_ssrf("http://target/fetch", method="POST", param_name="url")
@@ -190,14 +202,20 @@ class TestLdapInjection:
             "http://target/login",
             body="Login failed",
             status=401,
-            match=[responses.matchers.urlencoded_params_matcher({"username": "test", "password": "test"})],
+            match=[
+                responses.matchers.urlencoded_params_matcher(
+                    {"username": "test", "password": "test"}
+                )
+            ],
         )
         responses.add(
             responses.POST,
             "http://target/login",
             body="Login successful! Welcome admin",
             status=200,
-            match=[responses.matchers.urlencoded_params_matcher({"username": "*", "password": "*"})],
+            match=[
+                responses.matchers.urlencoded_params_matcher({"username": "*", "password": "*"})
+            ],
         )
 
         results = run_ldap_injection("http://target/login")

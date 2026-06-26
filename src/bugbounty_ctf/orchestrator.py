@@ -111,9 +111,9 @@ class Orchestrator:
 
     def run_phase_recon(self) -> PhaseResult:
         """Phase 1: Map the attack surface and detect technology."""
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"[ORCHESTRATOR] Phase 1: RECON — {self.target_url}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         result = PhaseResult(phase="recon")
 
@@ -170,18 +170,16 @@ class Orchestrator:
             result.recommendations.append(f"Investigate endpoint: {link}")
 
         if tech_hints:
-            result.recommendations.append(
-                f"Research methodology for: {', '.join(tech_hints)}"
-            )
+            result.recommendations.append(f"Research methodology for: {', '.join(tech_hints)}")
 
         self.report.phases.append(result)
         return result
 
     def run_phase_research(self, tech_hints: list[str] | None = None) -> PhaseResult:
         """Phase 2: Query the RAG knowledge base for relevant methodology."""
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print("[ORCHESTRATOR] Phase 2: RESEARCH — querying knowledge base")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         result = PhaseResult(phase="research")
 
@@ -210,9 +208,9 @@ class Orchestrator:
 
     def run_phase_fuzz(self, endpoints: list[str] | None = None) -> PhaseResult:
         """Phase 3: Test payloads against discovered endpoints."""
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print("[ORCHESTRATOR] Phase 3: FUZZ — testing payloads")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         result = PhaseResult(phase="fuzz")
 
@@ -227,7 +225,10 @@ class Orchestrator:
                 endpoints.append(form["action"])
 
             for link in links:
-                if any(keyword in link for keyword in ["login", "search", "api", "upload", "submit", "preview", "jobs"]):
+                if any(
+                    keyword in link
+                    for keyword in ["login", "search", "api", "upload", "submit", "preview", "jobs"]
+                ):
                     endpoints.append(link)
 
         endpoints = list(set(endpoints))
@@ -259,7 +260,9 @@ class Orchestrator:
                     else:
                         results = self.scanner.scan_endpoint(endpoint, method="GET", params=params)
                 else:
-                    results = self.scanner.scan_endpoint(endpoint, method="GET", params={"q": "test"})
+                    results = self.scanner.scan_endpoint(
+                        endpoint, method="GET", params={"q": "test"}
+                    )
 
                 for vuln_type, test_results in results.items():
                     confirmed = [r for r in test_results if r.confirmed]
@@ -278,7 +281,9 @@ class Orchestrator:
                             print(f"      Indicators: {c.indicators}")
 
                 for url_param in form_url_params.get(endpoint, []):
-                    self._test_ssrf_on_form(result, endpoint, form_method_map.get(endpoint, "POST"), url_param)
+                    self._test_ssrf_on_form(
+                        result, endpoint, form_method_map.get(endpoint, "POST"), url_param
+                    )
 
             except Exception as e:
                 print(f"    Error: {e}")
@@ -296,8 +301,11 @@ class Orchestrator:
         print(f"    Testing SSRF on parameter: {param_name}")
         try:
             ssrf_results = _test_ssrf_fn(
-                endpoint, method=method, param_name=param_name,
-                scanner=self.scanner, url_suffix="#.yaml",
+                endpoint,
+                method=method,
+                param_name=param_name,
+                scanner=self.scanner,
+                url_suffix="#.yaml",
             )
             for r in ssrf_results:
                 if r.get("interesting"):
@@ -329,9 +337,9 @@ class Orchestrator:
 
     def run_phase_exploit(self, findings: list[dict[str, Any]] | None = None) -> PhaseResult:
         """Phase 4: Chain confirmed findings into exploit paths."""
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print("[ORCHESTRATOR] Phase 4: EXPLOIT — chaining findings")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         result = PhaseResult(phase="exploit")
 
@@ -361,68 +369,102 @@ class Orchestrator:
         """Identify potential exploit chains from findings."""
         chains: list[dict[str, Any]] = []
 
-        sqli_findings = [f for f in findings if "sqli" in f.get("type", "").lower() or "sql" in f.get("indicators", [])]
-        xss_findings = [f for f in findings if "xss" in f.get("type", "").lower() or "xss" in f.get("indicators", [])]
-        ssrf_findings = [f for f in findings if "ssrf" in f.get("type", "").lower() or "ssrf" in f.get("indicators", [])]
-        aws_findings = [f for f in findings if "aws" in f.get("type", "").lower() or "credential" in f.get("type", "").lower()]
-        ssti_findings = [f for f in findings if "ssti" in f.get("type", "").lower() or "ssti" in f.get("indicators", [])]
-        cmdi_findings = [f for f in findings if "cmdi" in f.get("type", "").lower() or "command" in f.get("indicators", [])]
+        sqli_findings = [
+            f
+            for f in findings
+            if "sqli" in f.get("type", "").lower() or "sql" in f.get("indicators", [])
+        ]
+        xss_findings = [
+            f
+            for f in findings
+            if "xss" in f.get("type", "").lower() or "xss" in f.get("indicators", [])
+        ]
+        ssrf_findings = [
+            f
+            for f in findings
+            if "ssrf" in f.get("type", "").lower() or "ssrf" in f.get("indicators", [])
+        ]
+        aws_findings = [
+            f
+            for f in findings
+            if "aws" in f.get("type", "").lower() or "credential" in f.get("type", "").lower()
+        ]
+        ssti_findings = [
+            f
+            for f in findings
+            if "ssti" in f.get("type", "").lower() or "ssti" in f.get("indicators", [])
+        ]
+        cmdi_findings = [
+            f
+            for f in findings
+            if "cmdi" in f.get("type", "").lower() or "command" in f.get("indicators", [])
+        ]
 
         if sqli_findings:
-            chains.append({
-                "name": "SQLi → data exfiltration",
-                "steps": [
-                    f"SQLi found at {sqli_findings[0].get('endpoint', '?')}",
-                    "Dump database schema via UNION SELECT",
-                    "Extract credentials from users table",
-                    "Use credentials for authenticated access",
-                ],
-            })
+            chains.append(
+                {
+                    "name": "SQLi → data exfiltration",
+                    "steps": [
+                        f"SQLi found at {sqli_findings[0].get('endpoint', '?')}",
+                        "Dump database schema via UNION SELECT",
+                        "Extract credentials from users table",
+                        "Use credentials for authenticated access",
+                    ],
+                }
+            )
 
         if ssrf_findings or aws_findings:
-            chains.append({
-                "name": "SSRF → cloud metadata → credential theft",
-                "steps": [
-                    f"SSRF found at {ssrf_findings[0].get('endpoint', '?') if ssrf_findings else '?'}",
-                    "Bypass IP filter with decimal encoding (2852039166)",
-                    "Access /latest/meta-data/iam/security-credentials/ for IAM creds",
-                    f"AWS credentials leaked: {aws_findings[0].get('details', ['?'])[0] if aws_findings else 'not yet extracted'}",
-                    "Use credentials to access STS/S3/SQS or other cloud resources",
-                ],
-            })
+            chains.append(
+                {
+                    "name": "SSRF → cloud metadata → credential theft",
+                    "steps": [
+                        f"SSRF found at {ssrf_findings[0].get('endpoint', '?') if ssrf_findings else '?'}",
+                        "Bypass IP filter with decimal encoding (2852039166)",
+                        "Access /latest/meta-data/iam/security-credentials/ for IAM creds",
+                        f"AWS credentials leaked: {aws_findings[0].get('details', ['?'])[0] if aws_findings else 'not yet extracted'}",
+                        "Use credentials to access STS/S3/SQS or other cloud resources",
+                    ],
+                }
+            )
 
         if ssti_findings:
-            chains.append({
-                "name": "SSTI → RCE",
-                "steps": [
-                    f"SSTI found at {ssti_findings[0].get('endpoint', '?')}",
-                    "Escalate from {{7*7}} to Jinja2 RCE",
-                    "Read /etc/passwd and environment variables",
-                    "Access flag or credentials",
-                ],
-            })
+            chains.append(
+                {
+                    "name": "SSTI → RCE",
+                    "steps": [
+                        f"SSTI found at {ssti_findings[0].get('endpoint', '?')}",
+                        "Escalate from {{7*7}} to Jinja2 RCE",
+                        "Read /etc/passwd and environment variables",
+                        "Access flag or credentials",
+                    ],
+                }
+            )
 
         if cmdi_findings:
-            chains.append({
-                "name": "CMDi → RCE",
-                "steps": [
-                    f"Command injection at {cmdi_findings[0].get('endpoint', '?')}",
-                    "Execute id; whoami; cat /etc/passwd",
-                    "Enumerate filesystem for flags",
-                    "Establish persistence if needed",
-                ],
-            })
+            chains.append(
+                {
+                    "name": "CMDi → RCE",
+                    "steps": [
+                        f"Command injection at {cmdi_findings[0].get('endpoint', '?')}",
+                        "Execute id; whoami; cat /etc/passwd",
+                        "Enumerate filesystem for flags",
+                        "Establish persistence if needed",
+                    ],
+                }
+            )
 
         if xss_findings:
-            chains.append({
-                "name": "XSS → session theft",
-                "steps": [
-                    f"XSS found at {xss_findings[0].get('endpoint', '?')}",
-                    "Steal session cookies via callback listener",
-                    "Impersonate user with stolen session",
-                    "Access authenticated functionality",
-                ],
-            })
+            chains.append(
+                {
+                    "name": "XSS → session theft",
+                    "steps": [
+                        f"XSS found at {xss_findings[0].get('endpoint', '?')}",
+                        "Steal session cookies via callback listener",
+                        "Impersonate user with stolen session",
+                        "Access authenticated functionality",
+                    ],
+                }
+            )
 
         return chains
 
@@ -432,9 +474,9 @@ class Orchestrator:
         Args:
             interactive: If True, pause for human review between phases.
         """
-        print(f"\n{'#'*60}")
+        print(f"\n{'#' * 60}")
         print(f"# ORCHESTRATOR STARTING — {self.target_url}")
-        print(f"{'#'*60}")
+        print(f"{'#' * 60}")
 
         recon = self.run_phase_recon()
         if interactive:
@@ -456,11 +498,11 @@ class Orchestrator:
             1 for p in self.report.phases if p.phase == "fuzz" for f in p.findings
         )
 
-        print(f"\n{'#'*60}")
+        print(f"\n{'#' * 60}")
         print("# ORCHESTRATOR COMPLETE")
         print(f"# Total findings: {self.report.total_findings}")
         print(f"# Confirmed vulns: {self.report.confirmed_vulns}")
-        print(f"{'#'*60}")
+        print(f"{'#' * 60}")
 
         return self.report
 

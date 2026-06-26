@@ -135,7 +135,9 @@ class ResponseDiff:
 
     def _check_status_code(self) -> None:
         if self.baseline.status_code != self.test.status_code:
-            self.differences.append(f"Status: {self.baseline.status_code} → {self.test.status_code}")
+            self.differences.append(
+                f"Status: {self.baseline.status_code} → {self.test.status_code}"
+            )
             self.interesting = True
             self.indicators.append("status_code_change")
 
@@ -213,7 +215,12 @@ class ResponseDiff:
 
     def _check_headers(self) -> None:
         """Check for interesting header changes."""
-        interesting_headers = ["set-cookie", "x-powered-by", "server", "access-control-allow-origin"]
+        interesting_headers = [
+            "set-cookie",
+            "x-powered-by",
+            "server",
+            "access-control-allow-origin",
+        ]
 
         for header in interesting_headers:
             base_val = self.baseline.headers.get(header, "")
@@ -370,8 +377,14 @@ class ScannerDB:
                confidence, indicators, details, timestamp)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                target_host, endpoint, method, payload, vuln_type, confidence,
-                json.dumps(indicators or []), json.dumps(details or []),
+                target_host,
+                endpoint,
+                method,
+                payload,
+                vuln_type,
+                confidence,
+                json.dumps(indicators or []),
+                json.dumps(details or []),
                 datetime.now().isoformat(),
             ),
         )
@@ -391,8 +404,13 @@ class ScannerDB:
                interesting, indicators, timestamp)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
-                target_host, endpoint, method, payload, int(interesting),
-                json.dumps(indicators or []), datetime.now().isoformat(),
+                target_host,
+                endpoint,
+                method,
+                payload,
+                int(interesting),
+                json.dumps(indicators or []),
+                datetime.now().isoformat(),
             ),
         )
         self.conn.commit()
@@ -611,22 +629,29 @@ class SecurityScanner:
             result = self.test_payload(baseline, method, url, payload_data, payload_name, vuln_type)
             results.append(result)
 
-            self.test_history.append({
-                "endpoint": url,
-                "method": method,
-                "payload": payload_name,
-                "interesting": result["analysis"]["interesting"],
-                "indicators": result["analysis"]["indicators"],
-            })
+            self.test_history.append(
+                {
+                    "endpoint": url,
+                    "method": method,
+                    "payload": payload_name,
+                    "interesting": result["analysis"]["interesting"],
+                    "indicators": result["analysis"]["indicators"],
+                }
+            )
             self.db.save_history(
-                self.host, url, method, payload_name,
+                self.host,
+                url,
+                method,
+                payload_name,
                 result["analysis"]["interesting"],
                 result["analysis"]["indicators"],
             )
 
             if result["analysis"]["interesting"]:
                 self._record_finding(
-                    url, method, payload_name,
+                    url,
+                    method,
+                    payload_name,
                     result["analysis"]["indicators"],
                     result["analysis"]["differences"],
                     vuln_type,
@@ -660,11 +685,13 @@ class SecurityScanner:
             for sel in _SELECT_RE.finditer(form_html):
                 inputs.append({"name": sel.group(1), "value": "", "type": "select"})
 
-            forms.append({
-                "method": method,
-                "action": urljoin(self.base_url, action),
-                "inputs": inputs,
-            })
+            forms.append(
+                {
+                    "method": method,
+                    "action": urljoin(self.base_url, action),
+                    "inputs": inputs,
+                }
+            )
 
         links: list[str] = []
         for match in _HREF_RE.finditer(response.text):
@@ -758,16 +785,25 @@ class SecurityScanner:
 
         if test_param:
             test_configs = [
-                ("sqli", {
-                    "single_quote": "'",
-                    "or_true": "' OR 1=1--",
-                    "or_true_alt": "' OR '1'='1",
-                    "admin_comment": "admin'--",
-                    "union_null": "' UNION SELECT NULL--",
-                }),
+                (
+                    "sqli",
+                    {
+                        "single_quote": "'",
+                        "or_true": "' OR 1=1--",
+                        "or_true_alt": "' OR '1'='1",
+                        "admin_comment": "admin'--",
+                        "union_null": "' UNION SELECT NULL--",
+                    },
+                ),
                 ("ssti", {"ssti_basic": "{{7*7}}", "ssti_math49": "{{7*49}}"}),
                 ("cmdi", {"semicolon_id": "; id", "pipe_id": "| id", "dollar_id": "$(id)"}),
-                ("xss", {"script_tag": "<script>alert(1)</script>", "svg_onload": "<svg onload=alert(1)>"}),
+                (
+                    "xss",
+                    {
+                        "script_tag": "<script>alert(1)</script>",
+                        "svg_onload": "<svg onload=alert(1)>",
+                    },
+                ),
                 ("lfi", {"passwd": "../../../etc/passwd", "hosts": "../../../../../../etc/hosts"}),
             ]
 
@@ -775,14 +811,20 @@ class SecurityScanner:
                 confirmed_results: list[TestResult] = []
                 for payload_name, payload_value in payloads.items():
                     payload_data = {test_param: payload_value}
-                    raw = self.test_payload(baseline, method, url, payload_data, payload_name, vuln_type)
+                    raw = self.test_payload(
+                        baseline, method, url, payload_data, payload_name, vuln_type
+                    )
                     tr = self._to_test_result(raw, vuln_type)
 
                     if tr.interesting:
                         response = self._make_request(
-                            method, url,
-                            **({"data": {test_param: payload_value}} if is_post
-                               else {"params": {test_param: payload_value}})
+                            method,
+                            url,
+                            **(
+                                {"data": {test_param: payload_value}}
+                                if is_post
+                                else {"params": {test_param: payload_value}}
+                            ),
                         )
                         is_confirmed = confirm_vulnerability(
                             vuln_type, response.text, baseline_text, payload_value
@@ -855,32 +897,56 @@ def derive_base_url(url: str) -> str:
 
 CONFIRMATION_PATTERNS: dict[str, list[str]] = {
     "sqli": [
-        r"SQL syntax", r"You have an error in your SQL", r"sqlite3\.OperationalError",
-        r"pymysql\.err", r"psycopg2\.ProgrammingError", r"ORA-\d+",
-        r"unterminated.*string", r"near.*\".*\": syntax error",
-        r"mysql_fetch", r"SQLSTATE\[", r"pg_query\(",
-        r"unclosed.*quotation", r"Doctrine.*ORMException",
+        r"SQL syntax",
+        r"You have an error in your SQL",
+        r"sqlite3\.OperationalError",
+        r"pymysql\.err",
+        r"psycopg2\.ProgrammingError",
+        r"ORA-\d+",
+        r"unterminated.*string",
+        r"near.*\".*\": syntax error",
+        r"mysql_fetch",
+        r"SQLSTATE\[",
+        r"pg_query\(",
+        r"unclosed.*quotation",
+        r"Doctrine.*ORMException",
     ],
     "ssti": [
-        r"\b49\b", r"\b343\b", r"{{.*}}.*\d{2,}",
+        r"\b49\b",
+        r"\b343\b",
+        r"{{.*}}.*\d{2,}",
     ],
     "cmdi": [
-        r"uid=\d+", r"gid=\d+", r"groups=\d+", r"root:x:0:0",
-        r"\/bin\/(bash|sh|zsh)", r"daemon:x:\d+",
+        r"uid=\d+",
+        r"gid=\d+",
+        r"groups=\d+",
+        r"root:x:0:0",
+        r"\/bin\/(bash|sh|zsh)",
+        r"daemon:x:\d+",
     ],
     "xss": [
-        r"<script>alert\(1\)</script>", r"<svg onload=alert\(1\)>",
-        r"<img src=x onerror=", r"<details open ontoggle=",
+        r"<script>alert\(1\)</script>",
+        r"<svg onload=alert\(1\)>",
+        r"<img src=x onerror=",
+        r"<details open ontoggle=",
     ],
     "lfi": [
-        r"root:x:0:0", r"daemon:x:1:", r"bin:x:2:",
-        r"\/bin\/bash", r"\/usr\/sbin\/nologin",
+        r"root:x:0:0",
+        r"daemon:x:1:",
+        r"bin:x:2:",
+        r"\/bin\/bash",
+        r"\/usr\/sbin\/nologin",
         r"127\.0\.0\.1.*localhost",
     ],
     "ssrf": [
-        r"AccessKeyId", r"SecretAccessKey", r"Token",
-        r"ami-id", r"instance-id", r"iam\/security-credentials",
-        r"169\.254\.169\.254", r"meta-data",
+        r"AccessKeyId",
+        r"SecretAccessKey",
+        r"Token",
+        r"ami-id",
+        r"instance-id",
+        r"iam\/security-credentials",
+        r"169\.254\.169\.254",
+        r"meta-data",
     ],
 }
 
@@ -913,12 +979,18 @@ def confirm_vulnerability(
         if "7*49" in payload and "343" in response_text and "343" not in baseline_text:
             return True
 
-    return vuln_type == "xss" and bool(payload) and payload in response_text and payload not in baseline_text
+    return (
+        vuln_type == "xss"
+        and bool(payload)
+        and payload in response_text
+        and payload not in baseline_text
+    )
 
 
 # ============================================================================
 # IP Encoding Bypass Utilities
 # ============================================================================
+
 
 def ip_to_octal(ip: str) -> str:
     """Convert IP to octal format (127.0.0.1 → 0177.0.0.1)."""
@@ -1039,7 +1111,9 @@ def enumerate_aws_metadata(
             return
 
         lines = [line.strip() for line in content.split("\n") if line.strip()]
-        if len(lines) > 1 and all(not line.startswith("{") and not line.startswith("<") for line in lines):
+        if len(lines) > 1 and all(
+            not line.startswith("{") and not line.startswith("<") for line in lines
+        ):
             for line in lines:
                 if line.endswith("/"):
                     _explore(f"{path}{line}", depth + 1)

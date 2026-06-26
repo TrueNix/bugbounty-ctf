@@ -17,9 +17,7 @@ import time
 from contextlib import suppress
 
 
-def extract_file(
-    suid_binary: str, target_file: str, output_file: str, timeout: int = 10
-) -> bool:
+def extract_file(suid_binary: str, target_file: str, output_file: str, timeout: int = 10) -> bool:
     """Use a SUID binary (like alpine) to read a file as its owner.
 
     Args:

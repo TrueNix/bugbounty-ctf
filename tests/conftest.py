@@ -8,6 +8,7 @@ import pytest
 @pytest.fixture
 def fake_baseline_response() -> object:
     """A fake requests.Response for baseline comparisons."""
+
     class FakeResponse:
         def __init__(self) -> None:
             self.status_code = 200
@@ -21,6 +22,7 @@ def fake_baseline_response() -> object:
 @pytest.fixture
 def fake_sqli_error_response() -> object:
     """A fake response with SQL error — should trigger 'sql_error' indicator."""
+
     class FakeResponse:
         def __init__(self) -> None:
             self.status_code = 500
@@ -34,6 +36,7 @@ def fake_sqli_error_response() -> object:
 @pytest.fixture
 def fake_command_output_response() -> object:
     """A fake response with command output — should trigger 'command_output'."""
+
     class FakeResponse:
         def __init__(self) -> None:
             self.status_code = 200

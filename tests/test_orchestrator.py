@@ -95,7 +95,12 @@ class TestExploitPhase:
         orch = Orchestrator("http://target/")
         findings = [
             {"type": "sqli", "endpoint": "/login", "payload": "'", "indicators": ["sql_error"]},
-            {"type": "ssrf", "endpoint": "/fetch", "payload": "http://169.254.169.254", "indicators": []},
+            {
+                "type": "ssrf",
+                "endpoint": "/fetch",
+                "payload": "http://169.254.169.254",
+                "indicators": [],
+            },
         ]
         result = orch.run_phase_exploit(findings)
 
