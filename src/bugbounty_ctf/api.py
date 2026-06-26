@@ -53,11 +53,13 @@ from bugbounty_ctf.engine import (
 )
 from bugbounty_ctf.failures import FailureType, RequestFailure, handle_failure
 from bugbounty_ctf.flag_hunter import FlagHunter, hunt_flags
+from bugbounty_ctf.forensics import ForensicsToolkit
 from bugbounty_ctf.hypothesis import Hypothesis, HypothesisEngine
 from bugbounty_ctf.knowledge import KnowledgeBase
 from bugbounty_ctf.observations import Observation, ObservationStore, recommend_next_test
 from bugbounty_ctf.orchestrator import Orchestrator, OrchestratorReport, PhaseResult
 from bugbounty_ctf.post_exploit import PostExploit, post_exploit_enum
+from bugbounty_ctf.pwn import PwnToolkit
 from bugbounty_ctf.quick_tests import (
     map_surface,
     test_command_injection,
@@ -69,6 +71,7 @@ from bugbounty_ctf.quick_tests import (
     test_ssti,
 )
 from bugbounty_ctf.skill_runner import PhaseGuidance, SkillOrchestrator
+from bugbounty_ctf.smuggling import SmugglingDetector
 from bugbounty_ctf.ssrf_pivot import SSRFPivot
 
 __all__ = [
@@ -82,6 +85,7 @@ __all__ = [
     "ExploitAgent",
     "FailureType",
     "FlagHunter",
+    "ForensicsToolkit",
     "FuzzAgent",
     "Hypothesis",
     "HypothesisEngine",
@@ -93,6 +97,7 @@ __all__ = [
     "PhaseGuidance",
     "PhaseResult",
     "PostExploit",
+    "PwnToolkit",
     "ReconAgent",
     "RequestFailure",
     "ResearchAgent",
@@ -101,6 +106,7 @@ __all__ = [
     "ScannerDB",
     "SecurityScanner",
     "SkillOrchestrator",
+    "SmugglingDetector",
     "TestResult",
     "bypass_url_filter",
     "confirm_vulnerability",
