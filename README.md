@@ -26,6 +26,29 @@ Bundled SecLists payload wordlists ship inside the package
 (`bugbounty_ctf/wordlists/`), so they are available offline after install — no
 download required.
 
+### Use as a Hermes skill
+
+A bare `git clone` only gives Hermes the methodology layer (`SKILL.md`,
+`references/`, `templates/`). The Python toolkit
+(`from bugbounty_ctf import ...`) must be installed to be importable. Use the
+installer:
+
+```bash
+git clone https://github.com/TrueNix/bugbounty-ctf \
+    ~/.hermes/skills/red-teaming/bugbounty-ctf
+cd ~/.hermes/skills/red-teaming/bugbounty-ctf
+./install.sh            # editable pip install + register the skill (symlink, stays in sync)
+```
+
+- **Default (symlink)** — the skill directory points at the repo, so it never
+  drifts from your working copy.
+- **`./install.sh --copy`** — copies files into the skill directory instead and
+  installs a git `post-commit` hook that re-mirrors them, so the copy stays
+  drift-free too. `make sync-skill` re-mirrors on demand.
+- `HERMES_SKILL_DIR=/path ./install.sh` overrides the skill location.
+
+`make check` runs the full gate (ruff + mypy strict + pytest).
+
 ## Quick Start
 
 ```python
