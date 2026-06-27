@@ -21,5 +21,5 @@ Individual tests:
 from bugbounty_ctf.engine import ResponseDiff, SecurityScanner, TestResult
 from bugbounty_ctf.orchestrator import Orchestrator
 
-__version__ = "6.0.0"
+__version__ = "7.0.0"
 __all__ = ["Orchestrator", "ResponseDiff", "SecurityScanner", "TestResult", "__version__"]
