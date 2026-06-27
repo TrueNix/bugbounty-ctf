@@ -12,6 +12,8 @@ from bugbounty_ctf.advanced_tests import (
     forge_jwt_alg_none,
     forge_jwt_hs256,
     generate_aws_presigned_url,
+    graphql_field_dump,
+    graphql_introspection,
     save_report,
     test_file_upload,
     test_graphql_alias_batch,
@@ -58,6 +60,7 @@ from bugbounty_ctf.hypothesis import Hypothesis, HypothesisEngine
 from bugbounty_ctf.knowledge import KnowledgeBase
 from bugbounty_ctf.observations import Observation, ObservationStore, recommend_next_test
 from bugbounty_ctf.orchestrator import Orchestrator, OrchestratorReport, PhaseResult
+from bugbounty_ctf.osint import OSINTToolkit
 from bugbounty_ctf.post_exploit import PostExploit, post_exploit_enum
 from bugbounty_ctf.pwn import PwnToolkit
 from bugbounty_ctf.quick_tests import (
@@ -70,6 +73,7 @@ from bugbounty_ctf.quick_tests import (
     test_ssrf,
     test_ssti,
 )
+from bugbounty_ctf.reverse import ReverseToolkit
 from bugbounty_ctf.skill_runner import PhaseGuidance, SkillOrchestrator
 from bugbounty_ctf.smuggling import SmugglingDetector
 from bugbounty_ctf.ssrf_pivot import SSRFPivot
@@ -90,6 +94,7 @@ __all__ = [
     "Hypothesis",
     "HypothesisEngine",
     "KnowledgeBase",
+    "OSINTToolkit",
     "Observation",
     "ObservationStore",
     "Orchestrator",
@@ -102,6 +107,7 @@ __all__ = [
     "RequestFailure",
     "ResearchAgent",
     "ResponseDiff",
+    "ReverseToolkit",
     "SSRFPivot",
     "ScannerDB",
     "SecurityScanner",
@@ -122,6 +128,8 @@ __all__ = [
     "generate_aws_presigned_url",
     "generate_ssrf_bypass_ips",
     "get_aws_credentials",
+    "graphql_field_dump",
+    "graphql_introspection",
     "handle_failure",
     "hunt_flags",
     "ip_to_decimal",

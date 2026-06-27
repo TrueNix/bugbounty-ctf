@@ -1067,6 +1067,201 @@ def test_graphql_alias_batch(
 
 
 # ============================================================================
+# GraphQL Introspection
+# ============================================================================
+
+INTROSPECTION_QUERY = """{
+  __schema {
+    types {
+      name
+      kind
+      fields {
+        name
+        type {
+          name
+          kind
+          ofType {
+            name
+            kind
+          }
+        }
+      }
+      inputFields {
+        name
+        type { name kind }
+      }
+    }
+    queries: queryType { name }
+    mutations: mutationType { name }
+    subscriptions: subscriptionType { name }
+  }
+}"""
+
+FIELD_QUERY_TEMPLATE = """{{
+  __type(name: "{type_name}") {{
+    name
+    kind
+    fields {{
+      name
+      type {{ name kind ofType {{ name kind }} }}
+      args {{ name type {{ name kind }} }}
+    }}
+    inputFields {{ name type {{ name kind }} }}
+    enumValues {{ name }}
+  }}
+}}"""
+
+
+def graphql_introspection(
+    url: str,
+    *,
+    scanner: SecurityScanner | None = None,
+) -> dict[str, Any]:
+    """Perform GraphQL introspection to dump the schema.
+
+    Returns the full schema with all types, queries, mutations, and fields.
+    """
+    scanner_obj = _get_scanner_xss(url, scanner)
+    print(f"[*] GraphQL introspection on {url}")
+
+    r = scanner_obj._make_request(
+        "POST",
+        url,
+        json={"query": INTROSPECTION_QUERY},
+        headers={"Content-Type": "application/json"},
+    )
+
+    if r.status_code != 200:
+        print(f"  [-] Status {r.status_code}")
+        return {"error": f"HTTP {r.status_code}", "response": r.text[:200]}
+
+    try:
+        data = r.json()
+    except (ValueError, json.JSONDecodeError):
+        data = {}
+
+    if "data" not in data and "errors" in data:
+        errors = data.get("errors", [])
+        error_msg = errors[0].get("message", "") if errors else ""
+        if "introspection" in error_msg.lower():
+            print(f"  [-] Introspection disabled: {error_msg}")
+            return {"introspection_enabled": False, "error": error_msg}
+        print(f"  [-] GraphQL errors: {errors[:2]}")
+        return {"introspection_enabled": False, "errors": errors[:3]}
+
+    schema = data.get("data", {}).get("__schema", {})
+    if not schema:
+        print("  [-] No schema in response")
+        return {"introspection_enabled": False, "response": r.text[:500]}
+
+    types = schema.get("types", [])
+    queries = schema.get("queries", {}).get("name", "")
+    mutations = schema.get("mutations", {}).get("name", "")
+    subscriptions = schema.get("subscriptions", {}).get("name", "")
+
+    print("  [+] Introspection enabled!")
+    print(f"      Types: {len(types)}")
+    print(f"      Query type: {queries}")
+    print(f"      Mutation type: {mutations if mutations else 'none'}")
+    print(f"      Subscription type: {subscriptions if subscriptions else 'none'}")
+
+    interesting_types: list[dict[str, Any]] = []
+    for t in types:
+        type_name = t.get("name", "")
+        kind = t.get("kind", "")
+        fields = t.get("fields", [])
+
+        if type_name.startswith("__"):
+            continue
+
+        if kind == "OBJECT" and fields:
+            field_names = [f.get("name", "") for f in fields if f.get("name")]
+            if any(
+                kw in type_name.lower()
+                for kw in ["user", "admin", "auth", "session", "config", "secret", "flag", "token"]
+            ):
+                interesting_types.append(
+                    {
+                        "type": type_name,
+                        "fields": field_names,
+                        "reason": "interesting name",
+                    }
+                )
+                print(f"  [!] {type_name}: {field_names}")
+
+    return {
+        "introspection_enabled": True,
+        "types": types,
+        "query_type": queries,
+        "mutation_type": mutations,
+        "subscription_type": subscriptions,
+        "interesting_types": interesting_types,
+        "type_count": len(types),
+    }
+
+
+def graphql_field_dump(
+    url: str,
+    type_name: str,
+    *,
+    scanner: SecurityScanner | None = None,
+) -> dict[str, Any]:
+    """Dump all fields and arguments for a specific GraphQL type."""
+    scanner_obj = _get_scanner_xss(url, scanner)
+    print(f"[*] GraphQL field dump for type '{type_name}' on {url}")
+
+    query = FIELD_QUERY_TEMPLATE.format(type_name=type_name)
+    r = scanner_obj._make_request(
+        "POST",
+        url,
+        json={"query": query},
+        headers={"Content-Type": "application/json"},
+    )
+
+    if r.status_code != 200:
+        return {"error": f"HTTP {r.status_code}"}
+
+    try:
+        data = r.json()
+    except (ValueError, json.JSONDecodeError):
+        return {"error": "invalid JSON response"}
+
+    type_info = data.get("data", {}).get("__type", {})
+    if not type_info:
+        return {"error": "type not found", "response": data}
+
+    fields = type_info.get("fields", [])
+    input_fields = type_info.get("inputFields", [])
+    enum_values = type_info.get("enumValues", [])
+
+    print(f"  Type: {type_info.get('name')} ({type_info.get('kind')})")
+    if fields:
+        print(f"  Fields ({len(fields)}):")
+        for f in fields:
+            fname = f.get("name", "?")
+            ftype = f.get("type", {}).get("name", "?") or f.get("type", {}).get("ofType", {}).get(
+                "name", "?"
+            )
+            args = [a.get("name", "?") for a in f.get("args", [])]
+            print(f"    {fname}: {ftype}" + (f" (args: {args})" if args else ""))
+
+    if input_fields:
+        print(f"  Input fields ({len(input_fields)}):")
+        for inp in input_fields:
+            print(f"    {inp.get('name')}: {inp.get('type', {}).get('name', '?')}")
+
+    if enum_values:
+        print(f"  Enum values: {[e.get('name') for e in enum_values]}")
+
+    return {
+        "type": type_info,
+        "fields": fields,
+        "input_fields": input_fields,
+        "enum_values": enum_values,
+    }
+
+
+# ============================================================================
 # Chain Exploitation Helpers
 # ============================================================================
 
