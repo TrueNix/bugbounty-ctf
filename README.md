@@ -1,8 +1,14 @@
 # Bug Bounty & CTF Toolkit
 
-A Python toolkit for CTF challenges and authorized bug bounty hunting. Black-box testing methodology — discover vulnerabilities through observation and systematic testing, not by reading source code.
+A Python toolkit for CTF challenges and authorized bug bounty hunting. Black-box
+testing methodology — discover vulnerabilities through observation and systematic
+testing, not by reading source code.
 
 **Philosophy: Discover, Don't Read.**
+
+Covers web exploitation, cryptography, binary exploitation (pwn), reverse
+engineering, forensics, OSINT, AWS exploitation, SSRF pivoting, an FTS5-backed
+knowledge base, and a multi-agent orchestrator that can drive Hermes sub-agents.
 
 ## Installation
 
@@ -16,89 +22,155 @@ pip install bugbounty-ctf[pwn]
 pip install -e ".[dev]"
 ```
 
+Bundled SecLists payload wordlists ship inside the package
+(`bugbounty_ctf/wordlists/`), so they are available offline after install — no
+download required.
+
 ## Quick Start
 
 ```python
-from bugbounty_ctf import SecurityScanner
+from bugbounty_ctf import SecurityScanner, ScopeGuard
 from bugbounty_ctf.api import test_login_sqli, test_xss, map_surface, save_report
 
-# Map attack surface
-scanner = SecurityScanner("http://target/")
-surface = map_surface("http://target/")
+# Keep testing on authorized hosts — out-of-scope requests hard-fail.
+scope = ScopeGuard(["*.example.com"])
+scanner = SecurityScanner("http://app.example.com/", scope=scope)
 
-# Test a login form for SQLi
-test_login_sqli("http://target/login", scanner=scanner)
-
-# Test for XSS with filter-bypass escalation
-test_xss("http://target/search", param_name="q", scanner=scanner)
-
-# Generate and save a report
+surface = map_surface("http://app.example.com/", scanner=scanner)
+test_login_sqli("http://app.example.com/login", scanner=scanner)
+test_xss("http://app.example.com/search", param_name="q", scanner=scanner)
 save_report(scanner)
 ```
 
-## Features
+## Web Exploitation
 
 | Capability | Function |
 |:-----------|:---------|
-| Payload testing | `run_payload_set()` with baseline comparison |
-| Response diff | Status, length, timing, content patterns |
+| Payload testing | `SecurityScanner.run_payload_set()` with baseline comparison |
+| Response diff | Status, length, timing, content patterns (noise-stripped) |
 | Attack surface map | `map_surface()` — forms (any attribute order), links, tech |
-| WAF detection | `detect_defenses()` — WAF, rate limits, filters, missing headers |
+| WAF / defense detection | `detect_defenses()` — WAF, rate limits, filters, missing headers |
 | SQL injection | `test_login_sqli()` |
-| SSTI | `test_ssti()` — confirms via baseline comparison |
+| SSTI | `test_ssti()` — confirms via baseline comparison, 8 engines |
 | Command injection | `test_command_injection()` |
 | Path traversal | `test_path_traversal()` |
 | NoSQL injection | `test_nosqli()` |
 | LDAP injection | `test_ldap_injection()` |
-| SSRF | `test_ssrf()` |
-| XSS | `test_xss()` — 8-level filter-bypass escalation ladder |
+| SSRF | `test_ssrf()` + IP-encoding bypasses, AWS metadata enumeration |
+| XSS | `test_xss()` — filter-bypass escalation ladder |
 | IDOR | `test_idor()` — sequential ID probing with diff detection |
 | XXE | `test_xxe()` |
+| CORS misconfig | `test_cors()` — origin reflection, `null` trust, credentialed wildcard |
+| Open redirect | `test_open_redirect()` — redirect params + bypass payloads |
+| Content discovery | `discover_content()` — bundled `dirbrute` list, catch-all filtering |
 | Race conditions | `test_race_condition()` — concurrent request testing |
 | Deserialization | `test_pickle_deserialization()` / `test_yaml_deserialization()` |
-| JWT attacks | `test_jwt_attacks()` — alg=none, weak HS256 secret bruteforce |
-| File upload | `test_file_upload()` — 9 bypass variants + RCE verification |
-| GraphQL | `test_graphql_alias_batch()` — alias-batch brute force |
-| Chain exploitation | `ChainContext` — carry tokens across exploits |
+| JWT attacks | `test_jwt_attacks()`, `decode_jwt()`, `forge_jwt_alg_none/hs256()` |
+| File upload | `test_file_upload()` — bypass variants + RCE verification |
+| GraphQL | `test_graphql_alias_batch()`, `graphql_introspection()` |
+| Request smuggling | `SmugglingDetector` — CL.TE / TE.CL / TE.TE (raw-socket) |
+| WebSockets | `WebSocketTester` |
+| Chain exploitation | `ChainContext` — carry tokens/creds across exploits |
 | Reporting | `generate_report()` / `save_report()` — markdown or JSON |
+| Scope enforcement | `ScopeGuard` — fail-closed host allowlist on every request |
+
+## Other Domains
+
+| Domain | Entry point |
+|:-------|:------------|
+| Cryptography | `CryptoToolkit` — RSA (small-e, common-modulus, Wiener, Fermat), XOR, hash crack, encoding chains |
+| Binary exploitation | `PwnToolkit` — checksec, cyclic offset, ROP helpers (needs `pwntools`) |
+| Reverse engineering | `ReverseToolkit` — strings/symbols, radare2, Ghidra headless |
+| Forensics | `ForensicsToolkit` — binwalk, exiftool, steghide, zsteg, volatility |
+| OSINT | `OSINTToolkit` — crt.sh subdomains, dorks, Wayback, DNS, subdomain takeover |
+| AWS exploitation | `AWSExploiter`, `exploit_aws_credentials()`, SigV4 presigned URLs |
+| SSRF pivoting | `SSRFPivot` — internal port scan / service discovery via SSRF |
+| Post-exploitation | `PostExploit`, `post_exploit_enum()`, SUID PTY extraction |
+| Flag hunting | `FlagHunter`, `hunt_flags()` |
+| Payload wordlists | `WordlistLoader` — bundled SecLists lists + offline fallbacks |
+
+## Knowledge Base & Second Brain
+
+The toolkit accumulates knowledge across runs rather than starting cold:
+
+- **`KnowledgeBase`** — FTS5 full-text search over the `references/` methodology
+  docs; `search()` and `suggest_methodology(tech_hints)` retrieve relevant
+  exploit paths.
+- **Recall** — `ScannerDB` persists findings/history/attack-surface per host
+  (de-duplicated). The orchestrator recalls prior findings for a host into new
+  sessions (`findings_for_host()`).
+- **Write-back** — confirmed findings are written back as searchable
+  `learned::` lessons (`KnowledgeBase.add_lesson()`) that survive `reindex()`,
+  so future runs benefit from what actually worked.
+
+## Multi-Agent Orchestration
+
+`SkillOrchestrator` drives a recon → research → fuzz → exploit → verify workflow:
+
+```python
+from bugbounty_ctf.skill_runner import SkillOrchestrator
+
+runner = SkillOrchestrator("http://target/")
+
+# Interactive: the running agent executes each phase's guidance itself.
+guidance = runner.get_recon_guidance()   # includes RAG context + prior memory
+
+# Autonomous (headless): spawn one Hermes sub-agent (`hermes -z`) per phase.
+final = runner.run_with_agents()          # lazy guidance, shared state, verification
+print(final["confirmed_findings"], final["refuted_findings"])
+```
+
+- **Lazy guidance** — each phase is built from current scanner state, so findings
+  feed forward.
+- **Structured output** — sub-agents emit a `<FINDINGS>` JSON block that the
+  orchestrator parses and merges (deduped); they also share the orchestrator's
+  state file + `ScannerDB`.
+- **Adversarial verification** — a panel of skeptic sub-agents tries to refute
+  each finding; majority-refuted findings are dropped.
+
+`Orchestrator` (non-agent) and the `agents` module (`ReconAgent`, `FuzzAgent`,
+`ExploitAgent`, …) provide an in-process alternative.
 
 ## Architecture
 
 ```
 bugbounty_ctf/
-├── engine.py              # SecurityScanner, ResponseDiff, derive_base_url
-├── quick_tests.py         # One-liner test functions (SQLi, SSTI, CMDi, etc.)
-├── advanced_tests.py     # WAF detection, race conditions, XXE, JWT, XSS, IDOR, GraphQL
-├── web_recon.py           # Automated web target recon (shell-injection-safe)
-├── callback_listener.py   # HTTP listener for XSS/SSRF callback detection
-├── alpine_pty_extract.py  # SUID binary file extraction via PTY
-└── api.py                 # Public API exports
+├── engine.py            # SecurityScanner, ScannerDB, ResponseDiff, IP/SSRF utils
+├── scope.py             # ScopeGuard — authorized-host enforcement
+├── quick_tests.py       # One-liner tests: SQLi, SSTI, CMDi, SSRF, CORS, redirect, discovery
+├── advanced_tests.py    # WAF/defense detection, race, XXE, JWT, XSS, IDOR, GraphQL, AWS presign
+├── web_recon.py         # Automated web recon (shell-injection-safe)
+├── crypto.py            # RSA / XOR / hash / encoding attacks
+├── pwn.py               # Binary exploitation (pwntools)
+├── reverse.py           # radare2 / Ghidra reverse engineering
+├── forensics.py         # binwalk / exiftool / steghide / volatility
+├── osint.py             # subdomains, dorks, Wayback, subdomain takeover
+├── aws_exploit.py       # AWS credential abuse, SigV4 presigned URLs
+├── ssrf_pivot.py        # SSRF-based internal network pivoting
+├── smuggling.py         # HTTP request smuggling (raw socket)
+├── websocket.py         # WebSocket testing
+├── post_exploit.py      # Privesc enumeration
+├── alpine_pty_extract.py# SUID file extraction via PTY
+├── callback_listener.py # HTTP listener for XSS/SSRF OAST callbacks
+├── flag_hunter.py       # Filesystem flag hunting
+├── knowledge.py         # FTS5 knowledge base + learned lessons (write-back)
+├── orchestrator.py      # In-process phase orchestrator
+├── skill_runner.py      # Hermes sub-agent orchestrator (recall + verify + write-back)
+├── agents.py            # Recon/Research/Fuzz/Exploit agents
+├── hypothesis.py        # Hypothesis-driven testing engine
+├── observations.py      # Observation store + next-test recommendation
+├── session_recorder.py  # Record/replay HTTP sessions
+├── failures.py          # Structured request-failure handling
+├── wordlists.py         # WordlistLoader (bundled SecLists + cache)
+└── api.py               # Public API exports
 ```
 
 ## Reference Library
 
-The `references/` directory contains methodology docs built from real CTF and bug bounty experience:
-
-| File | Use when |
-|:-----|:---------|
-| `payload-library.md` | Organized payload sets by vulnerability class |
-| `escalate-ctf-walkthrough.md` | SQLi → webshell → SUID → docker root chain |
-| `advanced-escalation.md` | SUID PTY, PAM scripts, Docker escapes |
-| `suid-webshell-exploitation.md` | SUID binaries via webshell |
-| `suid-sg-docker-escalation.md` | `setresuid()` + `sg docker` pattern |
-| `docker-privilege-escalation.md` | Docker group → root |
-| `curl-executor-webshell.md` | SSRF curl executor → webshell → RCE |
-| `sqlite-php-sqli-playbook.md` | PHP+SQLite SQLi attack tree |
-| `sqlite-sqli-deep-dive.md` | pragma_*, sqlite_dbpage, FTS3 tokenizer |
-| `htb-recon-methodology.md` | HTB recon: machine ID, GitHub source discovery |
-| `aclabs-platform-patterns.md` | ACLabs.pro patterns, vuln-ID vs flag-capture |
-| `aclabs-drtbp-architecture.md` | DRTBP challenge architecture |
-| `aclabs-source-exploitation.md` | ACLabs source exploitation methodology |
-| `nginx-ui-exploitation.md` | nginx-ui: unauthenticated backup, RSA login |
-| `nginx-ui-login-encryption.md` | nginx-ui RSA login workflow |
-| `nginx-ui-backdoor.md` | nginx-ui backdoor analysis |
-| `recreating-ctf-labs-locally.md` | Rebuild CTF target as Docker Compose |
-| `ctf_helper.py` | `analyze_challenge()`, encoding detection, XOR, hash cracking |
+The `references/` directory contains methodology docs built from real CTF and bug
+bounty experience (SQLi playbooks, privilege-escalation chains, nginx-ui
+exploitation, HTB/ACLabs recon, payload library, and `ctf_helper.py`). They are
+indexed into the knowledge base and searchable via `KnowledgeBase.search()`.
 
 ## Templates
 
@@ -111,13 +183,15 @@ The `references/` directory contains methodology docs built from real CTF and bu
 pytest --cov=bugbounty_ctf --cov-report=term-missing
 ```
 
-Tests use the `responses` library for mocked HTTP — no real network calls.
+Tests use the `responses` library and mocks — no real network calls. The suite is
+linted with `ruff` and type-checked with `mypy --strict`.
 
 ## Security
 
 This toolkit is for authorized security testing only. Always obtain explicit
-permission before testing any target. See [SECURITY.md](SECURITY.md) for reporting
-vulnerabilities in this project.
+permission before testing any target, and use `ScopeGuard` to enforce your
+authorized scope. See [SECURITY.md](SECURITY.md) for reporting vulnerabilities in
+this project.
 
 ## License
 
