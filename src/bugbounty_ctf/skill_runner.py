@@ -441,11 +441,13 @@ class SkillOrchestrator:
                 "End your reply with a machine-readable findings block — a JSON array",
                 f"wrapped in <{SkillOrchestrator.FINDINGS_TAG}> … </{SkillOrchestrator.FINDINGS_TAG}> tags.",
                 "Each finding object must have: type, endpoint, method, payload, evidence,",
-                'confidence (one of "low"/"medium"/"high"). Emit an empty array if nothing',
-                "was found. Example:",
+                'confidence (one of "low"/"medium"/"high"), and source (the methodology',
+                "doc or reasoning that led to it). Emit an empty array if nothing was",
+                "found. Example:",
                 f"<{SkillOrchestrator.FINDINGS_TAG}>",
                 '[{"type":"sqli","endpoint":"/login","method":"POST",'
-                '"payload":"\' OR 1=1--","evidence":"SQL error reflected","confidence":"high"}]',
+                '"payload":"\' OR 1=1--","evidence":"SQL error reflected",'
+                '"confidence":"high","source":"sqlite-php-sqli-playbook.md"}]',
                 f"</{SkillOrchestrator.FINDINGS_TAG}>",
             ]
         )
@@ -497,6 +499,7 @@ class SkillOrchestrator:
                 continue
             existing.add(key)
             evidence = str(f.get("evidence", ""))
+            source = str(f.get("source") or f"agent:{self.current_phase}")
             self.scanner._record_finding(
                 endpoint=str(f.get("endpoint", "")),
                 method=str(f.get("method", "")),
@@ -504,6 +507,7 @@ class SkillOrchestrator:
                 indicators=[f"agent_reported:{f.get('confidence', 'unknown')}"],
                 details=[evidence] if evidence else [],
                 vuln_type=str(f.get("type", "")),
+                source=source,
             )
             added += 1
         return added

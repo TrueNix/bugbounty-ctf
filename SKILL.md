@@ -198,6 +198,18 @@ The toolkit learns across runs rather than starting cold each time:
   `reindex()` and are surfaced by `search()` / `suggest_methodology()`, so a
   future engagement against similar tech recalls what actually worked — not just
   the static reference corpus.
+- **Durable reasoning** — `ObservationStore(db=scanner.db, target_host=...)`
+  and `HypothesisEngine` persist observations and confirmed/rejected hypotheses
+  to `ScannerDB` (`query_observations` / `query_hypotheses`), so the agent's
+  reasoning survives process restarts instead of evaporating.
+- **Provenance** — findings carry a `source` field (the methodology doc / phase
+  that led to them), persisted alongside the finding for later audit.
+- **Retention** — `ScannerDB.prune_history(host, keep=N)` trims the unbounded
+  test-history log so the memory store stays clean.
+- **Optional semantic search** — `KnowledgeBase(embedder=fn)` enables a hybrid
+  retrieval mode: FTS5 supplies recall candidates, the embedder reranks them by
+  cosine similarity (vectors cached in `doc_vectors`). Fully optional — no ML
+  dependency is added.
 
 #### Autonomous mode: spawn one Hermes sub-agent per phase
 

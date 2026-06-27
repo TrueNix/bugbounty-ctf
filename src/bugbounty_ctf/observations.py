@@ -68,6 +68,26 @@ class Observation:
             "raw_excerpt": self.raw_excerpt[:200],
         }
 
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Observation:
+        """Rebuild an Observation from its dict form (for DB hydration)."""
+        return cls(
+            endpoint=d.get("endpoint", ""),
+            method=d.get("method", "GET"),
+            param=d.get("param", ""),
+            payload=d.get("payload", ""),
+            status_code=int(d.get("status_code", 0)),
+            response_length=int(d.get("response_length", 0)),
+            response_time=float(d.get("response_time", 0.0)),
+            indicators=list(d.get("indicators", [])),
+            evidence=d.get("evidence", ""),
+            confidence=float(d.get("confidence", 0.0)),
+            next_test=d.get("next_test", ""),
+            vuln_type=d.get("vuln_type", ""),
+            timestamp=d.get("timestamp", "") or datetime.now().isoformat(),
+            raw_excerpt=d.get("raw_excerpt", ""),
+        )
+
     def is_confirmed(self) -> bool:
         return self.confidence >= 0.7
 
@@ -106,11 +126,27 @@ class ObservationStore:
     that supports filtering by endpoint, vuln type, confidence, etc.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, db: Any = None, target_host: str = "") -> None:
         self.observations: list[Observation] = []
+        # Optional durable backing (a ScannerDB). When set, observations are
+        # persisted on add() and can be rehydrated with load_from_db() so the
+        # agent's reasoning survives process restarts.
+        self.db = db
+        self.target_host = target_host
 
     def add(self, obs: Observation) -> None:
         self.observations.append(obs)
+        if self.db is not None:
+            self.db.save_observation(self.target_host, obs.to_dict())
+
+    def load_from_db(self, *, min_confidence: float = 0.0) -> int:
+        """Hydrate observations from the backing DB. Returns the count loaded."""
+        if self.db is None:
+            return 0
+        rows = self.db.query_observations(self.target_host, min_confidence=min_confidence)
+        loaded = [Observation.from_dict(r) for r in rows]
+        self.observations = loaded
+        return len(loaded)
 
     def add_finding(
         self,
@@ -135,7 +171,7 @@ class ObservationStore:
             response_length=response_length,
             next_test=recommend_next_test(vuln_type, confidence),
         )
-        self.observations.append(obs)
+        self.add(obs)
         return obs
 
     def query(

@@ -29,6 +29,7 @@ Usage:
 
 from __future__ import annotations
 
+import contextlib
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -212,11 +213,27 @@ class HypothesisEngine:
     5. Confirms or rejects each hypothesis
     """
 
-    def __init__(self, scanner: SecurityScanner) -> None:
+    def __init__(self, scanner: SecurityScanner, *, persist: bool = True) -> None:
         self.scanner = scanner
         self.hypotheses: list[Hypothesis] = []
         self.confirmed: list[Hypothesis] = []
         self.rejected: list[Hypothesis] = []
+        # Persist resolved hypotheses to the scanner DB so the reasoning is
+        # durable across runs (queryable via scanner.db.query_hypotheses).
+        self.persist = persist
+
+    def _persist(self, h: Hypothesis) -> None:
+        if not self.persist:
+            return
+        with contextlib.suppress(Exception):
+            self.scanner.db.save_hypothesis(self.scanner.host, h.to_dict())
+
+    def load_prior(self, *, status: str = "confirmed") -> list[dict[str, Any]]:
+        """Recall hypotheses resolved in past runs against this host."""
+        try:
+            return self.scanner.db.query_hypotheses(self.scanner.host, status=status)
+        except Exception:
+            return []
 
     def generate_hypotheses(
         self,
@@ -364,11 +381,13 @@ class HypothesisEngine:
                         h.vuln_type,
                     )
                     self.confirmed.append(h)
+                    self._persist(h)
                     break
 
                 if h.rejected:
                     print(f"    [x] REJECTED: {h.vuln_type} confidence={h.confidence:.0%}")
                     self.rejected.append(h)
+                    self._persist(h)
                     break
 
             results.append(h)

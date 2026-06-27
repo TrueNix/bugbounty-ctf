@@ -10,12 +10,17 @@ No external dependencies — uses SQLite FTS5 (Python stdlib).
 from __future__ import annotations
 
 import contextlib
+import json
+import math
 import os
 import re
 import sqlite3
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
+
+Embedder = Callable[[str], Sequence[float]]
 
 
 def _default_db_path() -> str:
@@ -87,10 +92,18 @@ class KnowledgeBase:
     }
 
     def __init__(
-        self, db_path: str | None = None, references_dir: str | Path | None = None
+        self,
+        db_path: str | None = None,
+        references_dir: str | Path | None = None,
+        *,
+        embedder: Embedder | None = None,
     ) -> None:
         self.db_path = db_path or _default_db_path()
         self.references_dir = str(references_dir or self._find_references_dir())
+        # Optional embedding function for hybrid semantic search. When provided,
+        # FTS5 supplies recall candidates and the embedder reranks them by
+        # cosine similarity. Kept fully optional so the package has no ML deps.
+        self.embedder = embedder
         self._conn: sqlite3.Connection | None = None
         self._init_db()
         self._index_if_empty()
@@ -147,6 +160,12 @@ class KnowledgeBase:
                 VALUES('delete', old.id, old.filename, old.section, old.content, old.tags);
             END
         """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS doc_vectors (
+                doc_id INTEGER PRIMARY KEY,
+                vec TEXT NOT NULL
+            )
+        """)
         self.conn.commit()
 
     def _index_if_empty(self) -> None:
@@ -165,6 +184,8 @@ class KnowledgeBase:
         targets, not part of the static reference corpus.
         """
         self.conn.execute("DELETE FROM docs WHERE filename NOT LIKE ?", (f"{self.LESSON_PREFIX}%",))
+        # Re-inserted docs get fresh ids; drop cached vectors for lazy recompute.
+        self.conn.execute("DELETE FROM doc_vectors")
         self.conn.commit()
 
         count = 0
@@ -225,6 +246,8 @@ class KnowledgeBase:
         if not fts_query:
             return []
 
+        # With an embedder, pull a wider FTS candidate set to rerank semantically.
+        fetch = limit * 4 if self.embedder is not None else limit
         rows = self.conn.execute(
             """
             SELECT
@@ -239,11 +262,12 @@ class KnowledgeBase:
             ORDER BY rank
             LIMIT ?
             """,
-            (fts_query, limit),
+            (fts_query, fetch),
         ).fetchall()
 
-        return [
+        results = [
             {
+                "id": row["id"],
                 "filename": row["filename"],
                 "section": row["section"],
                 "snippet": row["snippet"],
@@ -251,6 +275,63 @@ class KnowledgeBase:
             }
             for row in rows
         ]
+
+        if self.embedder is not None and results:
+            results = self._semantic_rerank(query, results)
+
+        for r in results:
+            r.pop("id", None)
+        return results[:limit]
+
+    def _semantic_rerank(
+        self, query: str, candidates: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Rerank FTS candidates by cosine similarity to the query embedding."""
+        try:
+            qv = list(self.embedder(query)) if self.embedder else []
+        except Exception:
+            return candidates
+        if not qv:
+            return candidates
+        for c in candidates:
+            dv = self._doc_vector(int(c["id"]))
+            c["score"] = self._cosine(qv, dv)
+        candidates.sort(key=lambda c: c["score"], reverse=True)
+        return candidates
+
+    def _doc_vector(self, doc_id: int) -> list[float]:
+        """Return (and cache) the embedding for a doc row."""
+        row = self.conn.execute(
+            "SELECT vec FROM doc_vectors WHERE doc_id = ?", (doc_id,)
+        ).fetchone()
+        if row is not None:
+            return list(json.loads(row["vec"]))
+        content_row = self.conn.execute(
+            "SELECT content FROM docs WHERE id = ?", (doc_id,)
+        ).fetchone()
+        if content_row is None or self.embedder is None:
+            return []
+        try:
+            vec = [float(x) for x in self.embedder(content_row["content"])]
+        except Exception:
+            return []
+        self.conn.execute(
+            "INSERT OR REPLACE INTO doc_vectors (doc_id, vec) VALUES (?, ?)",
+            (doc_id, json.dumps(vec)),
+        )
+        self.conn.commit()
+        return vec
+
+    @staticmethod
+    def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        dot = sum(x * y for x, y in zip(a, b, strict=False))
+        na = math.sqrt(sum(x * x for x in a))
+        nb = math.sqrt(sum(y * y for y in b))
+        if na == 0.0 or nb == 0.0:
+            return 0.0
+        return dot / (na * nb)
 
     @staticmethod
     def _build_fts_query(query: str) -> str:

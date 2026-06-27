@@ -377,11 +377,42 @@ class ScannerDB:
                 surface_json TEXT NOT NULL,
                 timestamp TEXT
             );
+            CREATE TABLE IF NOT EXISTS observations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_host TEXT NOT NULL,
+                obs_json TEXT NOT NULL,
+                vuln_type TEXT,
+                endpoint TEXT,
+                confidence REAL DEFAULT 0.0,
+                timestamp TEXT
+            );
+            CREATE TABLE IF NOT EXISTS hypotheses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_host TEXT NOT NULL,
+                vuln_type TEXT,
+                endpoint TEXT,
+                param TEXT,
+                status TEXT,
+                confidence REAL DEFAULT 0.0,
+                hyp_json TEXT NOT NULL,
+                timestamp TEXT
+            );
             CREATE INDEX IF NOT EXISTS idx_findings_host ON findings(target_host);
             CREATE INDEX IF NOT EXISTS idx_findings_type ON findings(vuln_type);
             CREATE INDEX IF NOT EXISTS idx_history_host ON test_history(target_host);
+            CREATE INDEX IF NOT EXISTS idx_obs_host ON observations(target_host);
+            CREATE INDEX IF NOT EXISTS idx_hyp_host ON hypotheses(target_host);
         """)
         self.conn.commit()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Idempotent column migrations for DBs created by older versions."""
+        cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(findings)")}
+        if "source" not in cols:
+            # Provenance: which methodology/doc led to this finding.
+            self.conn.execute("ALTER TABLE findings ADD COLUMN source TEXT DEFAULT ''")
+            self.conn.commit()
 
     def save_finding(
         self,
@@ -393,6 +424,7 @@ class ScannerDB:
         confidence: float = 0.0,
         indicators: list[str] | None = None,
         details: list[str] | None = None,
+        source: str = "",
     ) -> None:
         """Persist a finding, de-duplicated on (host, endpoint, vuln_type, payload).
 
@@ -408,23 +440,27 @@ class ScannerDB:
             (target_host, endpoint, vuln_type, payload),
         ).fetchone()
         if existing is not None:
+            # Keep an existing non-empty source if this call doesn't supply one.
+            set_source = ", source = ?" if source else ""
+            params: tuple[Any, ...] = (
+                method,
+                confidence,
+                json.dumps(indicators or []),
+                json.dumps(details or []),
+                now,
+                *((source,) if source else ()),
+                existing["id"],
+            )
             self.conn.execute(
-                """UPDATE findings SET method = ?, confidence = ?, indicators = ?,
-                   details = ?, timestamp = ? WHERE id = ?""",
-                (
-                    method,
-                    confidence,
-                    json.dumps(indicators or []),
-                    json.dumps(details or []),
-                    now,
-                    existing["id"],
-                ),
+                f"""UPDATE findings SET method = ?, confidence = ?, indicators = ?,
+                    details = ?, timestamp = ?{set_source} WHERE id = ?""",
+                params,
             )
         else:
             self.conn.execute(
                 """INSERT INTO findings (target_host, endpoint, method, payload, vuln_type,
-                   confidence, indicators, details, timestamp)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   confidence, indicators, details, timestamp, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     target_host,
                     endpoint,
@@ -435,6 +471,7 @@ class ScannerDB:
                     json.dumps(indicators or []),
                     json.dumps(details or []),
                     now,
+                    source,
                 ),
             )
         self.conn.commit()
@@ -495,6 +532,95 @@ class ScannerDB:
         sql += " ORDER BY timestamp DESC LIMIT 500"
         rows = self.conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
+
+    def prune_history(self, target_host: str, keep: int = 2000) -> int:
+        """Trim a host's test_history to the most recent ``keep`` rows.
+
+        test_history is an append-only log that otherwise grows without bound;
+        pruning keeps the DB (the second-brain store) from accumulating stale
+        noise. Returns the number of rows deleted.
+        """
+        cur = self.conn.execute(
+            """DELETE FROM test_history
+               WHERE target_host = ? AND id NOT IN (
+                   SELECT id FROM test_history WHERE target_host = ?
+                   ORDER BY id DESC LIMIT ?
+               )""",
+            (target_host, target_host, keep),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    # ------------------------------------------------------------------ memory
+    def save_observation(self, target_host: str, obs: dict[str, Any]) -> None:
+        """Persist a structured observation (durable reasoning memory)."""
+        self.conn.execute(
+            """INSERT INTO observations
+               (target_host, obs_json, vuln_type, endpoint, confidence, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                target_host,
+                json.dumps(obs, default=str),
+                obs.get("vuln_type", ""),
+                obs.get("endpoint", ""),
+                float(obs.get("confidence", 0.0)),
+                obs.get("timestamp") or datetime.now().isoformat(),
+            ),
+        )
+        self.conn.commit()
+
+    def query_observations(
+        self, target_host: str, *, min_confidence: float = 0.0, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """SELECT obs_json FROM observations
+               WHERE target_host = ? AND confidence >= ?
+               ORDER BY id DESC LIMIT ?""",
+            (target_host, min_confidence, limit),
+        ).fetchall()
+        return [json.loads(r["obs_json"]) for r in rows]
+
+    def save_hypothesis(self, target_host: str, hyp: dict[str, Any]) -> None:
+        """Persist a hypothesis with its status (confirmed/rejected/pending)."""
+        status = (
+            "confirmed"
+            if hyp.get("confirmed")
+            else "rejected"
+            if hyp.get("rejected")
+            else "pending"
+        )
+        self.conn.execute(
+            """INSERT INTO hypotheses
+               (target_host, vuln_type, endpoint, param, status, confidence, hyp_json, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                target_host,
+                hyp.get("vuln_type", ""),
+                hyp.get("endpoint", ""),
+                hyp.get("param", ""),
+                status,
+                float(hyp.get("confidence", 0.0)),
+                json.dumps(hyp, default=str),
+                datetime.now().isoformat(),
+            ),
+        )
+        self.conn.commit()
+
+    def query_hypotheses(
+        self, target_host: str, *, status: str | None = None, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        if status:
+            rows = self.conn.execute(
+                """SELECT hyp_json FROM hypotheses
+                   WHERE target_host = ? AND status = ? ORDER BY id DESC LIMIT ?""",
+                (target_host, status, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT hyp_json FROM hypotheses WHERE target_host = ? ORDER BY id DESC LIMIT ?",
+                (target_host, limit),
+            ).fetchall()
+        return [json.loads(r["hyp_json"]) for r in rows]
 
     def close(self) -> None:
         if self._conn is not None:
@@ -683,8 +809,13 @@ class SecurityScanner:
         indicators: list[str],
         details: list[str],
         vuln_type: str = "",
+        source: str = "",
     ) -> None:
-        """Record a finding in memory, JSON state, and SQLite."""
+        """Record a finding in memory, JSON state, and SQLite.
+
+        ``source`` is provenance — the methodology doc, phase, or tool that led
+        to the finding — persisted alongside it for later audit.
+        """
         finding = {
             "type": vuln_type or "potential_vulnerability",
             "endpoint": endpoint,
@@ -692,6 +823,7 @@ class SecurityScanner:
             "payload": payload,
             "indicators": indicators,
             "details": details,
+            "source": source,
             "timestamp": datetime.now().isoformat(),
         }
         self.findings.append(finding)
@@ -704,6 +836,7 @@ class SecurityScanner:
             confidence=0.8 if indicators else 0.0,
             indicators=indicators,
             details=details,
+            source=source,
         )
 
     def test_payload(
