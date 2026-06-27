@@ -309,7 +309,6 @@ class Orchestrator:
                 method=method,
                 param_name=param_name,
                 scanner=self.scanner,
-                url_suffix="#.yaml",
             )
             for r in ssrf_results:
                 if r.get("interesting"):

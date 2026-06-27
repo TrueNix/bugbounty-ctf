@@ -9,7 +9,7 @@ Uses an existing SSRF vulnerability to:
 Usage:
     from bugbounty_ctf.ssrf_pivot import SSRFPivot
 
-    pivot = SSRFPivot(scanner, ssrf_url="http://target/jobs/preview", param_name="url")
+    pivot = SSRFPivot(scanner, ssrf_url="http://target/fetch", param_name="url")
     open_ports = pivot.port_scan("0177.0.0.1", ports=[80, 5000, 9090, 3000, 8000])
     services = pivot.fingerprint_services(open_ports)
     flags = pivot.exploit_internal_services(services)
@@ -126,7 +126,7 @@ class SSRFPivot:
         ssrf_url: str,
         param_name: str = "url",
         method: str = "POST",
-        url_suffix: str = "#.yaml",
+        url_suffix: str = "",
     ) -> None:
         self.scanner = scanner
         self.ssrf_url = ssrf_url

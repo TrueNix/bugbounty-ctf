@@ -196,7 +196,8 @@ class TestCloudFindingRecording:
 
         it = iter(responses)
         sc._make_request = lambda *a, **k: next(it)  # type: ignore[method-assign,assignment]
-        creds = get_aws_credentials(sc)
+        # SSRF sink is passed explicitly (generic API — no hardcoded endpoint).
+        creds = get_aws_credentials(sc, ssrf_endpoint="http://t.test/fetch")
         assert creds and creds["AccessKeyId"] == "ASIA123"
         assert any(f["type"] == "ssrf_aws_credentials" for f in sc.findings)
         assert sc.db.findings_for_host(sc.host)  # persisted
@@ -204,6 +205,33 @@ class TestCloudFindingRecording:
     def test_bypass_url_filter_records_finding(self) -> None:
         sc = SecurityScanner("http://t.test/", db=ScannerDB(":memory:"))
         sc._make_request = lambda *a, **k: _Resp("Fetched: ok")  # type: ignore[method-assign,assignment]
-        out = bypass_url_filter("http://t.test/x", sc)
+        out = bypass_url_filter("http://t.test/x", sc, ssrf_endpoint="http://t.test/fetch")
         assert out is not None
         assert any(f["type"] == "ssrf_filter_bypass" for f in sc.findings)
+
+
+class TestSsrfDiscovery:
+    """The SSRF sink must be discovered from the surface, never hardcoded."""
+
+    def test_find_ssrf_endpoints_flags_url_params(self) -> None:
+        from bugbounty_ctf.engine import find_ssrf_endpoints
+
+        sc = SecurityScanner("http://t.test/", db=ScannerDB(":memory:"))
+        # Seed a mapped surface with a URL-accepting form and a benign one.
+        sc.attack_surface["/"] = {
+            "forms": [
+                {
+                    "action": "http://t.test/fetch",
+                    "method": "POST",
+                    "inputs": [{"name": "url", "type": "url"}],
+                },
+                {
+                    "action": "http://t.test/login",
+                    "method": "POST",
+                    "inputs": [{"name": "username", "type": "text"}],
+                },
+            ]
+        }
+        sinks = find_ssrf_endpoints(sc)
+        assert {"url": "http://t.test/fetch", "method": "POST", "param": "url"} in sinks
+        assert all(s["url"] != "http://t.test/login" for s in sinks)

