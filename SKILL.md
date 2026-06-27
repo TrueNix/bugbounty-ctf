@@ -94,6 +94,7 @@ scanner = SecurityScanner("http://target/")
 - `test_xss(url, method, param_name, scanner=scanner)` — Test for XSS with 8-level filter-bypass escalation
 - `test_idor(url_template, scanner=scanner)` — Test for IDOR (sequential ID probing)
 - `test_graphql_alias_batch(url, query_template, scanner=scanner)` — GraphQL alias-batch brute force
+- `OASTServer()` + `test_blind_ssrf/_rce/_xxe(url, scanner=scanner, oast=oast)` — Out-of-band confirmation of blind SSRF / RCE / XXE via a per-token callback listener
 - `test_cors(url, scanner=scanner)` — Detect CORS misconfigurations (origin reflection, `null` trust, credentialed wildcard)
 - `test_open_redirect(url, scanner=scanner)` — Probe redirect params (next/url/redirect/…) with bypass payloads, confirm Location points off-site
 - `discover_content(base_url, scanner=scanner)` — Directory/content brute force using the bundled `dirbrute` wordlist (auto-filters catch-all routing responses)

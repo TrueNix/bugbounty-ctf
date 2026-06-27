@@ -60,6 +60,7 @@ save_report(scanner)
 | XSS | `test_xss()` — filter-bypass escalation ladder |
 | IDOR | `test_idor()` — sequential ID probing with diff detection |
 | XXE | `test_xxe()` |
+| Blind / OOB (OAST) | `OASTServer` + `test_blind_ssrf()` / `test_blind_rce()` / `test_blind_xxe()` — confirm blind vulns via callback |
 | CORS misconfig | `test_cors()` — origin reflection, `null` trust, credentialed wildcard |
 | Open redirect | `test_open_redirect()` — redirect params + bypass payloads |
 | Content discovery | `discover_content()` — bundled `dirbrute` list, catch-all filtering |
@@ -151,7 +152,8 @@ bugbounty_ctf/
 ├── websocket.py         # WebSocket testing
 ├── post_exploit.py      # Privesc enumeration
 ├── alpine_pty_extract.py# SUID file extraction via PTY
-├── callback_listener.py # HTTP listener for XSS/SSRF OAST callbacks
+├── oast.py              # In-process OAST collaborator + blind SSRF/RCE/XXE tests
+├── callback_listener.py # Standalone CLI HTTP listener for XSS/SSRF callbacks
 ├── flag_hunter.py       # Filesystem flag hunting
 ├── knowledge.py         # FTS5 knowledge base + learned lessons (write-back)
 ├── orchestrator.py      # In-process phase orchestrator

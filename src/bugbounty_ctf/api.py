@@ -59,6 +59,12 @@ from bugbounty_ctf.flag_hunter import FlagHunter, hunt_flags
 from bugbounty_ctf.forensics import ForensicsToolkit
 from bugbounty_ctf.hypothesis import Hypothesis, HypothesisEngine
 from bugbounty_ctf.knowledge import KnowledgeBase
+from bugbounty_ctf.oast import (
+    OASTServer,
+    test_blind_rce,
+    test_blind_ssrf,
+    test_blind_xxe,
+)
 from bugbounty_ctf.observations import Observation, ObservationStore, recommend_next_test
 from bugbounty_ctf.orchestrator import Orchestrator, OrchestratorReport, PhaseResult
 from bugbounty_ctf.osint import OSINTToolkit
@@ -102,6 +108,7 @@ __all__ = [
     "Hypothesis",
     "HypothesisEngine",
     "KnowledgeBase",
+    "OASTServer",
     "OSINTToolkit",
     "Observation",
     "ObservationStore",
@@ -154,6 +161,9 @@ __all__ = [
     "post_exploit_enum",
     "recommend_next_test",
     "save_report",
+    "test_blind_rce",
+    "test_blind_ssrf",
+    "test_blind_xxe",
     "test_command_injection",
     "test_cors",
     "test_file_upload",
