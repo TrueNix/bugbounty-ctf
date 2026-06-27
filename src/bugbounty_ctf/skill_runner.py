@@ -35,6 +35,8 @@ class PhaseGuidance:
     rag_context: str = ""
     scanner_state: str = ""
     previous_findings: list[dict[str, Any]] = field(default_factory=list)
+    # Findings recalled from prior runs against this host (the DB "memory").
+    prior_memory: list[dict[str, Any]] = field(default_factory=list)
     # Shared-persistence handles so a spawned sub-agent writes its findings to
     # the same state file / DB the orchestrator reads back between phases.
     target_url: str = ""
@@ -132,6 +134,34 @@ class SkillOrchestrator:
             "waf_detected": self.scanner.waf_detected,
         }
 
+    def _recall_prior(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Recall findings from past runs against this host (DB second-brain).
+
+        Deduped by (vuln_type, endpoint) for a compact memory summary that seeds
+        the new session instead of starting cold every time.
+        """
+        try:
+            rows = self.scanner.db.findings_for_host(self.scanner.host, limit=limit)
+        except Exception:
+            return []
+        seen: set[tuple[Any, Any]] = set()
+        memory: list[dict[str, Any]] = []
+        for r in rows:
+            key = (r.get("vuln_type"), r.get("endpoint"))
+            if key in seen:
+                continue
+            seen.add(key)
+            memory.append(
+                {
+                    "vuln_type": r.get("vuln_type"),
+                    "endpoint": r.get("endpoint"),
+                    "payload": r.get("payload"),
+                    "confidence": r.get("confidence"),
+                    "last_seen": r.get("timestamp"),
+                }
+            )
+        return memory
+
     def get_recon_guidance(self) -> PhaseGuidance:
         self.current_phase = "recon"
         rag = self._query_rag("reconnaissance attack surface mapping web application")
@@ -145,6 +175,7 @@ class SkillOrchestrator:
             ],
             rag_context=rag,
             scanner_state=self._format_state(),
+            prior_memory=self._recall_prior(),
         )
 
     def get_research_guidance(self) -> PhaseGuidance:
@@ -167,6 +198,7 @@ class SkillOrchestrator:
             ],
             rag_context="\n".join(rag_lines),
             scanner_state=self._format_state(),
+            prior_memory=self._recall_prior(),
         )
 
     def get_fuzz_guidance(self) -> PhaseGuidance:
@@ -385,6 +417,15 @@ class SkillOrchestrator:
         if guidance.scanner_state:
             lines.extend(["", "## Current scanner state", guidance.scanner_state])
 
+        if guidance.prior_memory:
+            lines.extend(["", "## Prior memory (confirmed on this host in past runs)"])
+            for m in guidance.prior_memory[:15]:
+                lines.append(
+                    f"  - {m.get('vuln_type', '?')} @ {m.get('endpoint', '?')}"
+                    f" (payload: {str(m.get('payload', ''))[:60]})"
+                )
+            lines.append("Re-check these first; they are known weak points.")
+
         if guidance.previous_findings:
             lines.extend(["", "## Previous findings"])
             for f in guidance.previous_findings[:10]:
@@ -536,11 +577,45 @@ class SkillOrchestrator:
         if verify:
             verdicts = self.verify_findings(votes=verify_votes, timeout=timeout_per_phase)
             final["verification"] = verdicts
-            final["confirmed_findings"] = [v["finding"] for v in verdicts if not v["refuted"]]
+            confirmed = [v["finding"] for v in verdicts if not v["refuted"]]
+            final["confirmed_findings"] = confirmed
             final["refuted_findings"] = [v["finding"] for v in verdicts if v["refuted"]]
+        else:
+            confirmed = list(self.scanner.findings)
+
+        # Write-back: persist what worked into the searchable knowledge base so
+        # future runs recall it (the second-brain learning loop).
+        final["lessons_written"] = self._writeback_lessons(confirmed)
 
         self.save_results()
         return final
+
+    def _writeback_lessons(self, findings: list[dict[str, Any]]) -> int:
+        """Record confirmed findings as searchable KB lessons. Returns count added."""
+        tech = self._format_discovered().get("tech_hints", [])
+        written = 0
+        for f in findings:
+            vuln = str(f.get("type") or f.get("vuln_type") or "finding")
+            endpoint = str(f.get("endpoint", ""))
+            payload = str(f.get("payload", ""))
+            evidence = "; ".join(str(d) for d in (f.get("details") or [])) or str(
+                f.get("evidence", "")
+            )
+            title = f"{vuln} on {self.scanner.host}{endpoint}"
+            body = (
+                f"Confirmed {vuln} at {endpoint} on {self.target_url}.\n"
+                f"Payload: {payload}\nEvidence: {evidence}\n"
+                f"Tech: {', '.join(tech) if tech else 'unknown'}"
+            )
+            tags = ", ".join([vuln, *tech])
+            try:
+                if self.kb.add_lesson(title, body, tags=tags, host=self.scanner.host, key=vuln):
+                    written += 1
+            except Exception:
+                continue
+        if written:
+            print(f"[memory] Wrote {written} lesson(s) to the knowledge base")
+        return written
 
     @staticmethod
     def _build_verify_prompt(finding: dict[str, Any], target_url: str) -> str:

@@ -394,23 +394,58 @@ class ScannerDB:
         indicators: list[str] | None = None,
         details: list[str] | None = None,
     ) -> None:
-        self.conn.execute(
-            """INSERT INTO findings (target_host, endpoint, method, payload, vuln_type,
-               confidence, indicators, details, timestamp)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                target_host,
-                endpoint,
-                method,
-                payload,
-                vuln_type,
-                confidence,
-                json.dumps(indicators or []),
-                json.dumps(details or []),
-                datetime.now().isoformat(),
-            ),
-        )
+        """Persist a finding, de-duplicated on (host, endpoint, vuln_type, payload).
+
+        Re-running a scan re-discovers the same vulns; without dedup the findings
+        table — the toolkit's cross-run memory — fills with duplicate rows and
+        recall surfaces noise. A repeat refreshes confidence/details/timestamp
+        in place instead of appending.
+        """
+        now = datetime.now().isoformat()
+        existing = self.conn.execute(
+            """SELECT id FROM findings
+               WHERE target_host = ? AND endpoint = ? AND vuln_type = ? AND payload = ?""",
+            (target_host, endpoint, vuln_type, payload),
+        ).fetchone()
+        if existing is not None:
+            self.conn.execute(
+                """UPDATE findings SET method = ?, confidence = ?, indicators = ?,
+                   details = ?, timestamp = ? WHERE id = ?""",
+                (
+                    method,
+                    confidence,
+                    json.dumps(indicators or []),
+                    json.dumps(details or []),
+                    now,
+                    existing["id"],
+                ),
+            )
+        else:
+            self.conn.execute(
+                """INSERT INTO findings (target_host, endpoint, method, payload, vuln_type,
+                   confidence, indicators, details, timestamp)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    target_host,
+                    endpoint,
+                    method,
+                    payload,
+                    vuln_type,
+                    confidence,
+                    json.dumps(indicators or []),
+                    json.dumps(details or []),
+                    now,
+                ),
+            )
         self.conn.commit()
+
+    def findings_for_host(self, target_host: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Recall prior findings for a host (most recent first) — cross-run memory."""
+        rows = self.conn.execute(
+            "SELECT * FROM findings WHERE target_host = ? ORDER BY timestamp DESC LIMIT ?",
+            (target_host, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def save_history(
         self,

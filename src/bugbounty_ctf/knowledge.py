@@ -13,6 +13,7 @@ import contextlib
 import os
 import re
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -154,9 +155,16 @@ class KnowledgeBase:
             return
         self.reindex()
 
+    LESSON_PREFIX = "learned::"
+
     def reindex(self) -> int:
-        """Reindex all reference docs. Returns number of sections indexed."""
-        self.conn.execute("DELETE FROM docs")
+        """Reindex all reference docs. Returns number of sections indexed.
+
+        Learned lessons (filename prefixed ``learned::``) are preserved — they
+        are the toolkit's write-back memory of what actually worked on past
+        targets, not part of the static reference corpus.
+        """
+        self.conn.execute("DELETE FROM docs WHERE filename NOT LIKE ?", (f"{self.LESSON_PREFIX}%",))
         self.conn.commit()
 
         count = 0
@@ -319,6 +327,40 @@ class KnowledgeBase:
         """List all indexed reference doc filenames."""
         rows = self.conn.execute("SELECT DISTINCT filename FROM docs ORDER BY filename").fetchall()
         return [row["filename"] for row in rows]
+
+    def add_lesson(
+        self, title: str, body: str, *, tags: str = "", host: str = "", key: str = ""
+    ) -> bool:
+        """Write a lesson learned from a confirmed finding into the knowledge base.
+
+        Lessons are stored as ``learned::`` docs, so they are immediately
+        searchable via :meth:`search`/:meth:`suggest_methodology` and survive
+        :meth:`reindex`. This is the write-back half of the second-brain loop:
+        future runs recall what actually worked on past targets, not just the
+        static reference corpus. Returns False if an identical lesson exists.
+        """
+        fname = f"{self.LESSON_PREFIX}{key or host or 'general'}"
+        exists = self.conn.execute(
+            "SELECT 1 FROM docs WHERE filename = ? AND section = ? AND content = ? LIMIT 1",
+            (fname, title, body),
+        ).fetchone()
+        if exists is not None:
+            return False
+        self.conn.execute(
+            "INSERT INTO docs (filename, section, content, tags, indexed_at) VALUES (?, ?, ?, ?, ?)",
+            (fname, title, body, tags, datetime.now().isoformat()),
+        )
+        self.conn.commit()
+        return True
+
+    def list_lessons(self) -> list[dict[str, str]]:
+        """Return all learned lessons (write-back memory), most recent first."""
+        rows = self.conn.execute(
+            "SELECT filename, section, content, tags FROM docs "
+            "WHERE filename LIKE ? ORDER BY indexed_at DESC",
+            (f"{self.LESSON_PREFIX}%",),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def close(self) -> None:
         if self._conn is not None:

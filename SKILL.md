@@ -183,6 +183,22 @@ The orchestrator automatically:
 - Tracks findings in SQLite (ScannerDB) for cross-target analysis
 - Runs SSRF + AWS metadata extraction when URL parameters are found
 
+#### Second-brain loop (recall + write-back)
+
+The toolkit learns across runs rather than starting cold each time:
+
+- **Recall** — at recon/research, the orchestrator pulls prior confirmed
+  findings for the same host out of `ScannerDB` (`findings_for_host`) and injects
+  them into the guidance and sub-agent prompt as "Prior memory — re-check these
+  first." Findings are de-duplicated on `(host, endpoint, vuln_type, payload)` so
+  the memory stays clean and a repeat scan refreshes a row instead of appending.
+- **Write-back** — after the verification pass, each *confirmed* finding is
+  synthesized into a lesson and written into the knowledge base
+  (`KnowledgeBase.add_lesson`, stored as a `learned::` doc). Lessons survive
+  `reindex()` and are surfaced by `search()` / `suggest_methodology()`, so a
+  future engagement against similar tech recalls what actually worked — not just
+  the static reference corpus.
+
 #### Autonomous mode: spawn one Hermes sub-agent per phase
 
 For headless/unattended runs (cron, CI, batch targets) where no interactive

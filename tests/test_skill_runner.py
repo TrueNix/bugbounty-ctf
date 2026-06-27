@@ -15,11 +15,20 @@ from bugbounty_ctf.skill_runner import PhaseGuidance, SkillOrchestrator
 
 
 class _FakeKB:
+    def __init__(self) -> None:
+        self.lessons: list[tuple[str, str]] = []
+
     def search(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         return []
 
     def suggest_methodology(self, tech: list[str]) -> list[dict[str, Any]]:
         return []
+
+    def add_lesson(
+        self, title: str, body: str, *, tags: str = "", host: str = "", key: str = ""
+    ) -> bool:
+        self.lessons.append((title, body))
+        return True
 
 
 @pytest.fixture
@@ -121,6 +130,31 @@ class TestFeedForward:
         # fuzz/exploit guidance saw findings the earlier agents persisted.
         assert seen_prev_counts[-1] > 0
         assert seen_prev_counts == sorted(seen_prev_counts)
+
+
+class TestSecondBrain:
+    def test_recon_guidance_recalls_prior_findings(self, runner: SkillOrchestrator) -> None:
+        # Seed the DB as if a past run found something on this host.
+        runner.scanner.db.save_finding(
+            runner.scanner.host, "/login", "sqli", payload="'", confidence=0.9
+        )
+        guidance = runner.get_recon_guidance()
+        assert any(m["vuln_type"] == "sqli" for m in guidance.prior_memory)
+
+    def test_prior_memory_rendered_in_prompt(self, runner: SkillOrchestrator) -> None:
+        runner.scanner.db.save_finding(runner.scanner.host, "/login", "sqli", payload="'")
+        prompt = SkillOrchestrator._build_agent_prompt(runner.get_recon_guidance())
+        assert "Prior memory" in prompt
+        assert "sqli @ /login" in prompt
+
+    def test_writeback_creates_lessons(self, runner: SkillOrchestrator) -> None:
+        n = runner._writeback_lessons(
+            [{"type": "sqli", "endpoint": "/login", "payload": "'", "details": ["SQL error"]}]
+        )
+        assert n == 1
+        kb = runner.kb
+        assert isinstance(kb, _FakeKB)
+        assert any("sqli on target.test/login" in title for title, _ in kb.lessons)
 
 
 class TestStructuredOutput:
