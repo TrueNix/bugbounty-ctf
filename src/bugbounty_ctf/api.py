@@ -74,9 +74,12 @@ from bugbounty_ctf.quick_tests import (
     test_ssti,
 )
 from bugbounty_ctf.reverse import ReverseToolkit
+from bugbounty_ctf.session_recorder import SessionRecorder
 from bugbounty_ctf.skill_runner import PhaseGuidance, SkillOrchestrator
 from bugbounty_ctf.smuggling import SmugglingDetector
 from bugbounty_ctf.ssrf_pivot import SSRFPivot
+from bugbounty_ctf.websocket import WebSocketTester
+from bugbounty_ctf.wordlists import WordlistLoader
 
 __all__ = [
     "AWSExploiter",
@@ -111,9 +114,12 @@ __all__ = [
     "SSRFPivot",
     "ScannerDB",
     "SecurityScanner",
+    "SessionRecorder",
     "SkillOrchestrator",
     "SmugglingDetector",
     "TestResult",
+    "WebSocketTester",
+    "WordlistLoader",
     "bypass_url_filter",
     "confirm_vulnerability",
     "create_agent",
