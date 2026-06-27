@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from bugbounty_ctf.engine import ScannerDB, SecurityScanner
+from bugbounty_ctf.engine import (
+    ScannerDB,
+    SecurityScanner,
+    bypass_url_filter,
+    get_aws_credentials,
+)
 from bugbounty_ctf.hypothesis import Hypothesis, HypothesisEngine
 from bugbounty_ctf.knowledge import KnowledgeBase
 from bugbounty_ctf.observations import ObservationStore
@@ -170,3 +175,35 @@ class TestRetentionAndProvenance:
         db2 = ScannerDB(p)  # re-open: _migrate must not error or duplicate the column
         db2.save_finding("h", "/x", "sqli", payload="'", source="s")
         assert db2.findings_for_host("h")[0]["source"] == "s"
+
+
+class _Resp:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.status_code = 200
+
+
+class TestCloudFindingRecording:
+    """SSRF→AWS wins must land in the findings DB (regression: previously the
+    metadata/credential helpers returned data but recorded nothing)."""
+
+    def test_get_aws_credentials_records_finding(self) -> None:
+        sc = SecurityScanner("http://t.test/", db=ScannerDB(":memory:"))
+        responses = [
+            _Resp("<pre>nimbus-web-role</pre>"),  # role listing
+            _Resp('<pre>{"AccessKeyId": "ASIA123", "SecretAccessKey": "x", "Token": "y"}</pre>'),
+        ]
+
+        it = iter(responses)
+        sc._make_request = lambda *a, **k: next(it)  # type: ignore[method-assign,assignment]
+        creds = get_aws_credentials(sc)
+        assert creds and creds["AccessKeyId"] == "ASIA123"
+        assert any(f["type"] == "ssrf_aws_credentials" for f in sc.findings)
+        assert sc.db.findings_for_host(sc.host)  # persisted
+
+    def test_bypass_url_filter_records_finding(self) -> None:
+        sc = SecurityScanner("http://t.test/", db=ScannerDB(":memory:"))
+        sc._make_request = lambda *a, **k: _Resp("Fetched: ok")  # type: ignore[method-assign,assignment]
+        out = bypass_url_filter("http://t.test/x", sc)
+        assert out is not None
+        assert any(f["type"] == "ssrf_filter_bypass" for f in sc.findings)

