@@ -9,6 +9,9 @@ install-copy:   ## Editable install + copy the skill (+ drift-protection hook)
 sync-skill:     ## Re-mirror the repo into the installed (copy-mode) Hermes skill
 	bash scripts/sync-skill.sh
 
+install-autosync: ## Register the on_session_start hook (pull latest from GitHub on start)
+	python3 scripts/register_autosync_hook.py
+
 check: lint test ## Run the full gate (lint + types + tests)
 
 lint:

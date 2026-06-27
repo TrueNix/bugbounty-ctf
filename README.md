@@ -47,6 +47,20 @@ cd ~/.hermes/skills/red-teaming/bugbounty-ctf
   drift-free too. `make sync-skill` re-mirrors on demand.
 - `HERMES_SKILL_DIR=/path ./install.sh` overrides the skill location.
 
+**Auto-update from GitHub on start.** Add `--autosync` (or `make install-autosync`)
+to register a Hermes `on_session_start` hook that pulls the latest `main` from
+GitHub when a session begins:
+
+```bash
+./install.sh --autosync
+```
+
+The hook (`scripts/hermes-skill-autosync.sh`) is safe by design: it only
+fast-forwards a **clean checkout on `main`**, is throttled (one network check
+per hour, tunable via `BBCTF_AUTOSYNC_THROTTLE`), and never blocks the session
+(always exits 0). Hermes asks for one-time consent the first time it fires.
+Remove it with `python3 scripts/register_autosync_hook.py --remove`.
+
 `make check` runs the full gate (ruff + mypy strict + pytest).
 
 ## Quick Start

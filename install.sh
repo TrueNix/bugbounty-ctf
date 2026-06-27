@@ -13,7 +13,13 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="${HERMES_SKILL_DIR:-$HOME/.hermes/skills/red-teaming/bugbounty-ctf}"
 MODE="symlink"
-[ "${1:-}" = "--copy" ] && MODE="copy"
+AUTOSYNC=0
+for arg in "$@"; do
+    case "$arg" in
+        --copy) MODE="copy" ;;
+        --autosync) AUTOSYNC=1 ;;
+    esac
+done
 
 echo "[*] repo:  $REPO_DIR"
 echo "[*] skill: $SKILL_DIR ($MODE mode)"
@@ -45,6 +51,12 @@ else
         chmod +x "$hook"
         echo "[+] Copied + installed a post-commit re-sync hook (keeps the copy drift-free)."
     fi
+fi
+
+if [ "$AUTOSYNC" = "1" ]; then
+    echo "[*] Registering on_session_start autosync hook (pull latest from GitHub on start)..."
+    python3 "$REPO_DIR/scripts/register_autosync_hook.py"
+    echo "    Note: Hermes asks for one-time consent the first time the hook fires."
 fi
 
 python -c "from bugbounty_ctf import SecurityScanner; print('[+] import OK')"
