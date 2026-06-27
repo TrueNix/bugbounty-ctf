@@ -156,6 +156,47 @@ class TestSecondBrain:
         assert isinstance(kb, _FakeKB)
         assert any("sqli on target.test/login" in title for title, _ in kb.lessons)
 
+    def test_recon_recalls_prior_hypotheses(self, runner: SkillOrchestrator) -> None:
+        db, host = runner.scanner.db, runner.scanner.host
+        db.save_hypothesis(
+            host, {"vuln_type": "sqli", "param": "id", "endpoint": "/x", "confirmed": True}
+        )
+        db.save_hypothesis(host, {"vuln_type": "xss", "param": "q", "rejected": True})
+        guidance = runner.get_recon_guidance()
+        statuses = {(h["vuln_type"], h["status"]) for h in guidance.prior_hypotheses}
+        assert ("sqli", "confirmed") in statuses
+        assert ("xss", "rejected") in statuses
+
+    def test_recon_recalls_prior_observations(self, runner: SkillOrchestrator) -> None:
+        db, host = runner.scanner.db, runner.scanner.host
+        db.save_observation(
+            host,
+            {
+                "vuln_type": "sqli",
+                "endpoint": "/login",
+                "confidence": 0.8,
+                "next_test": "try UNION",
+            },
+        )
+        # Low-confidence observation must be filtered out.
+        db.save_observation(host, {"vuln_type": "xss", "endpoint": "/q", "confidence": 0.1})
+        guidance = runner.get_recon_guidance()
+        vts = {o["vuln_type"] for o in guidance.prior_observations}
+        assert "sqli" in vts and "xss" not in vts
+
+    def test_prompt_renders_hypotheses_and_observations(self, runner: SkillOrchestrator) -> None:
+        db, host = runner.scanner.db, runner.scanner.host
+        db.save_hypothesis(host, {"vuln_type": "sqli", "param": "id", "confirmed": True})
+        db.save_hypothesis(host, {"vuln_type": "xss", "param": "q", "rejected": True})
+        db.save_observation(
+            host,
+            {"vuln_type": "lfi", "endpoint": "/f", "confidence": 0.7, "next_test": "read passwd"},
+        )
+        prompt = SkillOrchestrator._build_agent_prompt(runner.get_recon_guidance())
+        assert "Prior hypotheses" in prompt
+        assert "skip" in prompt  # rejected hypotheses guidance
+        assert "Prior observations" in prompt
+
 
 class TestStructuredOutput:
     def test_parse_findings_extracts_array(self) -> None:

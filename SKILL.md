@@ -187,11 +187,13 @@ The orchestrator automatically:
 
 The toolkit learns across runs rather than starting cold each time:
 
-- **Recall** — at recon/research, the orchestrator pulls prior confirmed
-  findings for the same host out of `ScannerDB` (`findings_for_host`) and injects
-  them into the guidance and sub-agent prompt as "Prior memory — re-check these
-  first." Findings are de-duplicated on `(host, endpoint, vuln_type, payload)` so
-  the memory stays clean and a repeat scan refreshes a row instead of appending.
+- **Recall** — at recon/research, the orchestrator pulls prior memory for the
+  same host out of `ScannerDB` and injects it into the guidance and sub-agent
+  prompt: prior **findings** ("re-check these first"), resolved **hypotheses**
+  (confirmed → re-check, rejected → skip the known dead ends), and
+  high-confidence **observations** (with their next-test hints). Findings are
+  de-duplicated on `(host, endpoint, vuln_type, payload)` so the memory stays
+  clean and a repeat scan refreshes a row instead of appending.
 - **Write-back** — after the verification pass, each *confirmed* finding is
   synthesized into a lesson and written into the knowledge base
   (`KnowledgeBase.add_lesson`, stored as a `learned::` doc). Lessons survive

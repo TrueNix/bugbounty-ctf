@@ -37,6 +37,9 @@ class PhaseGuidance:
     previous_findings: list[dict[str, Any]] = field(default_factory=list)
     # Findings recalled from prior runs against this host (the DB "memory").
     prior_memory: list[dict[str, Any]] = field(default_factory=list)
+    # Resolved hypotheses and high-confidence observations from past runs.
+    prior_hypotheses: list[dict[str, Any]] = field(default_factory=list)
+    prior_observations: list[dict[str, Any]] = field(default_factory=list)
     # Shared-persistence handles so a spawned sub-agent writes its findings to
     # the same state file / DB the orchestrator reads back between phases.
     target_url: str = ""
@@ -162,6 +165,68 @@ class SkillOrchestrator:
             )
         return memory
 
+    def _recall_hypotheses(self, limit: int = 40) -> list[dict[str, Any]]:
+        """Recall resolved hypotheses (confirmed + rejected) for this host.
+
+        Confirmed → known weak points to re-check; rejected → dead ends the new
+        run can skip. Deduped by (vuln_type, param), keeping the latest verdict.
+        """
+        try:
+            rows = self.scanner.db.query_hypotheses(self.scanner.host, limit=limit)
+        except Exception:
+            return []
+        seen: set[tuple[Any, Any]] = set()
+        out: list[dict[str, Any]] = []
+        for h in rows:
+            status = (
+                "confirmed"
+                if h.get("confirmed")
+                else "rejected"
+                if h.get("rejected")
+                else "pending"
+            )
+            if status == "pending":
+                continue
+            key = (h.get("vuln_type"), h.get("param"))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(
+                {
+                    "vuln_type": h.get("vuln_type"),
+                    "param": h.get("param"),
+                    "endpoint": h.get("endpoint"),
+                    "status": status,
+                    "confidence": round(float(h.get("confidence", 0.0)), 2),
+                }
+            )
+        return out
+
+    def _recall_observations(self, limit: int = 40) -> list[dict[str, Any]]:
+        """Recall high-confidence observations (with their next-test hints)."""
+        try:
+            rows = self.scanner.db.query_observations(
+                self.scanner.host, min_confidence=0.5, limit=limit
+            )
+        except Exception:
+            return []
+        seen: set[tuple[Any, Any]] = set()
+        out: list[dict[str, Any]] = []
+        for o in rows:
+            key = (o.get("vuln_type"), o.get("endpoint"))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(
+                {
+                    "vuln_type": o.get("vuln_type"),
+                    "endpoint": o.get("endpoint"),
+                    "next_test": o.get("next_test", ""),
+                    "confidence": o.get("confidence"),
+                }
+            )
+        return out
+
     def get_recon_guidance(self) -> PhaseGuidance:
         self.current_phase = "recon"
         rag = self._query_rag("reconnaissance attack surface mapping web application")
@@ -176,6 +241,8 @@ class SkillOrchestrator:
             rag_context=rag,
             scanner_state=self._format_state(),
             prior_memory=self._recall_prior(),
+            prior_hypotheses=self._recall_hypotheses(),
+            prior_observations=self._recall_observations(),
         )
 
     def get_research_guidance(self) -> PhaseGuidance:
@@ -199,6 +266,8 @@ class SkillOrchestrator:
             rag_context="\n".join(rag_lines),
             scanner_state=self._format_state(),
             prior_memory=self._recall_prior(),
+            prior_hypotheses=self._recall_hypotheses(),
+            prior_observations=self._recall_observations(),
         )
 
     def get_fuzz_guidance(self) -> PhaseGuidance:
@@ -425,6 +494,27 @@ class SkillOrchestrator:
                     f" (payload: {str(m.get('payload', ''))[:60]})"
                 )
             lines.append("Re-check these first; they are known weak points.")
+
+        if guidance.prior_hypotheses:
+            confirmed = [h for h in guidance.prior_hypotheses if h.get("status") == "confirmed"]
+            rejected = [h for h in guidance.prior_hypotheses if h.get("status") == "rejected"]
+            lines.extend(["", "## Prior hypotheses (past runs)"])
+            if confirmed:
+                lines.append(
+                    "  confirmed (re-check): "
+                    + ", ".join(f"{h['vuln_type']}@{h['param']}" for h in confirmed[:8])
+                )
+            if rejected:
+                lines.append(
+                    "  rejected (skip — already ruled out): "
+                    + ", ".join(f"{h['vuln_type']}@{h['param']}" for h in rejected[:8])
+                )
+
+        if guidance.prior_observations:
+            lines.extend(["", "## Prior observations — suggested next tests"])
+            for o in guidance.prior_observations[:8]:
+                hint = str(o.get("next_test", ""))[:80]
+                lines.append(f"  - {o.get('vuln_type', '?')} @ {o.get('endpoint', '?')}: {hint}")
 
         if guidance.previous_findings:
             lines.extend(["", "## Previous findings"])
