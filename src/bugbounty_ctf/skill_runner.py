@@ -35,6 +35,11 @@ class PhaseGuidance:
     rag_context: str = ""
     scanner_state: str = ""
     previous_findings: list[dict[str, Any]] = field(default_factory=list)
+    # Shared-persistence handles so a spawned sub-agent writes its findings to
+    # the same state file / DB the orchestrator reads back between phases.
+    target_url: str = ""
+    state_file: str = ""
+    db_path: str = ""
 
 
 class SkillOrchestrator:
@@ -229,11 +234,17 @@ class SkillOrchestrator:
             host = self.scanner.host
             path = os.path.expanduser(f"~/.hermes/reports/skill_{host}_{ts}.json")
 
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(path, "w") as f:
             json.dump(self.collect_results(), f, indent=2, default=str)
         print(f"[*] Results saved to {path}")
         return path
+
+    PHASES: tuple[str, ...] = ("recon", "research", "fuzz", "exploit")
+    FINDINGS_TAG = "FINDINGS"
+    VERDICT_TAG = "VERDICT"
 
     def run_all_phases(self) -> list[PhaseGuidance]:
         return [
@@ -243,17 +254,65 @@ class SkillOrchestrator:
             self.get_exploit_guidance(),
         ]
 
+    def _guidance_for(self, phase: str) -> PhaseGuidance:
+        """Build the guidance for a single phase from CURRENT scanner state.
+
+        Used by the sub-agent workflow so each phase's prompt reflects what the
+        previous phase's agent actually discovered (unlike ``run_all_phases``,
+        which snapshots every phase upfront).
+        """
+        builders = {
+            "recon": self.get_recon_guidance,
+            "research": self.get_research_guidance,
+            "fuzz": self.get_fuzz_guidance,
+            "exploit": self.get_exploit_guidance,
+        }
+        guidance = builders[phase]()
+        return self._attach_shared_context(guidance)
+
+    def _attach_shared_context(self, guidance: PhaseGuidance) -> PhaseGuidance:
+        """Stamp the shared-persistence handles onto a guidance object."""
+        guidance.target_url = self.target_url
+        guidance.state_file = self.scanner.state_file
+        guidance.db_path = self.scanner.db.db_path
+        return guidance
+
+    def _reload_state(self) -> None:
+        """Re-read findings/surface a sub-agent persisted, so the next phase
+        (and the final report) reflect what it discovered."""
+        self.scanner._load_state()
+
+    class HermesNotFoundError(RuntimeError):
+        """Raised when the `hermes` binary is not on PATH."""
+
     def spawn_agent(self, guidance: PhaseGuidance, *, timeout: int = 120) -> str:
         """Spawn a Hermes sub-agent for a phase using `hermes -z`.
 
         The sub-agent gets the phase guidance as a one-shot prompt,
         including RAG context, scanner state, and available tools.
         The sub-agent executes using the main Hermes model.
+
+        The prompt is passed as a single argv element with the list form of
+        ``subprocess.run`` (no ``shell=True``), so target-derived data baked
+        into the prompt (form names, endpoints, response snippets) cannot break
+        out into shell arguments. A non-zero exit surfaces stderr instead of
+        being silently reported as an empty response, and a missing ``hermes``
+        binary raises :class:`HermesNotFoundError` so the caller can abort
+        rather than recording four empty phases.
         """
-        prompt = self._build_agent_prompt(guidance)
+        return self._run_hermes(
+            self._build_agent_prompt(guidance), timeout=timeout, label=guidance.phase
+        )
 
+    def _run_hermes(self, prompt: str, *, timeout: int, label: str = "agent") -> str:
+        """Run one `hermes -z` sub-agent with a prebuilt prompt and return stdout.
+
+        The prompt is a single argv element (list-form ``subprocess.run``, no
+        shell), so target-derived data inside it cannot break out into shell
+        arguments. Non-zero exit surfaces stderr; a missing binary raises
+        :class:`HermesNotFoundError`.
+        """
         cmd = ["hermes", "-z", prompt, "--yolo"]
-
         try:
             result = subprocess.run(
                 cmd,
@@ -262,13 +321,20 @@ class SkillOrchestrator:
                 timeout=timeout,
                 env={**os.environ, "HERMES_NO_STREAM": "1"},
             )
-            response = result.stdout.strip()
-            print(f"[{guidance.phase}] Agent response: {len(response)} chars")
-            return response
+        except FileNotFoundError as e:
+            raise self.HermesNotFoundError(
+                "`hermes` binary not found on PATH — cannot spawn sub-agents"
+            ) from e
         except subprocess.TimeoutExpired:
             return f"[TIMEOUT after {timeout}s]"
-        except Exception as e:
-            return f"[ERROR: {e}]"
+
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip()
+            return f"[HERMES ERROR rc={result.returncode}] {stderr[:500]}"
+
+        response = result.stdout.strip()
+        print(f"[{label}] Agent response: {len(response)} chars")
+        return response
 
     @staticmethod
     def _build_agent_prompt(guidance: PhaseGuidance) -> str:
@@ -277,12 +343,38 @@ class SkillOrchestrator:
 
         lines = [
             f"You are a security testing agent for the {guidance.phase} phase.",
-            "",
-            "## Discovered so far",
-            _json.dumps(guidance.discovered, indent=2, default=str)[:1000],
-            "",
-            "## Available tools",
         ]
+
+        if guidance.target_url:
+            # Share the orchestrator's persistence so findings written here are
+            # visible to the next phase and to the final report.
+            lines.extend(
+                [
+                    "",
+                    "## Bootstrap (use this exact scanner — it shares state with the orchestrator)",
+                    "```python",
+                    "from bugbounty_ctf import SecurityScanner",
+                    "from bugbounty_ctf.engine import ScannerDB",
+                    "from bugbounty_ctf import api  # test_*, detect_defenses, get_aws_credentials…",
+                    "scanner = SecurityScanner(",
+                    f"    {guidance.target_url!r},",
+                    f"    state_file={guidance.state_file!r},",
+                    f"    db=ScannerDB({guidance.db_path!r}),",
+                    ")",
+                    "```",
+                    "Run the tools against `scanner` so every finding is persisted automatically.",
+                ]
+            )
+
+        lines.extend(
+            [
+                "",
+                "## Discovered so far",
+                _json.dumps(guidance.discovered, indent=2, default=str)[:1000],
+                "",
+                "## Available tools",
+            ]
+        )
 
         for tool in guidance.available_tools:
             lines.append(f"  - {tool}")
@@ -302,39 +394,217 @@ class SkillOrchestrator:
             [
                 "",
                 "## Your task",
-                f"Execute the {guidance.phase} phase. Use the available tools.",
-                "Report findings as structured text with type, endpoint, payload, and evidence.",
+                f"Execute the {guidance.phase} phase. Use the available tools against `scanner`.",
+                "",
+                "## Required output",
+                "End your reply with a machine-readable findings block — a JSON array",
+                f"wrapped in <{SkillOrchestrator.FINDINGS_TAG}> … </{SkillOrchestrator.FINDINGS_TAG}> tags.",
+                "Each finding object must have: type, endpoint, method, payload, evidence,",
+                'confidence (one of "low"/"medium"/"high"). Emit an empty array if nothing',
+                "was found. Example:",
+                f"<{SkillOrchestrator.FINDINGS_TAG}>",
+                '[{"type":"sqli","endpoint":"/login","method":"POST",'
+                '"payload":"\' OR 1=1--","evidence":"SQL error reflected","confidence":"high"}]',
+                f"</{SkillOrchestrator.FINDINGS_TAG}>",
             ]
         )
 
         return "\n".join(lines)
 
-    def run_with_agents(self, *, timeout_per_phase: int = 120) -> dict[str, Any]:
-        """Run all phases with Hermes sub-agents.
+    @staticmethod
+    def _extract_tagged_json(text: str, tag: str) -> Any:
+        """Extract and parse a JSON payload wrapped in <TAG> … </TAG>.
 
-        Each phase spawns a Hermes sub-agent that gets the guidance prompt.
-        Findings from each phase feed into the next.
+        Returns the parsed object, or None when the block is absent or invalid.
+        Tolerant of an optional ```json fence inside the tags.
+        """
+        start = text.find(f"<{tag}>")
+        end = text.find(f"</{tag}>")
+        if start == -1 or end == -1 or end < start:
+            return None
+        body = text[start + len(tag) + 2 : end].strip()
+        if body.startswith("```"):
+            body = body.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        try:
+            return json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            return None
+
+    @classmethod
+    def _parse_findings(cls, response: str) -> list[dict[str, Any]]:
+        """Parse the <FINDINGS> JSON array a sub-agent emits (best-effort)."""
+        parsed = cls._extract_tagged_json(response, cls.FINDINGS_TAG)
+        if not isinstance(parsed, list):
+            return []
+        return [f for f in parsed if isinstance(f, dict) and f.get("type")]
+
+    def _merge_agent_findings(self, parsed: list[dict[str, Any]]) -> int:
+        """Merge sub-agent-reported findings into the scanner, de-duplicated.
+
+        This is the robust feed-forward path: even if a sub-agent never touched
+        the shared ScannerDB, its declared findings are recorded centrally so
+        the next phase and the final report see them. Dedup key is
+        (type, endpoint, payload).
+        """
+        existing = {
+            (f.get("type"), f.get("endpoint"), f.get("payload")) for f in self.scanner.findings
+        }
+        added = 0
+        for f in parsed:
+            key = (f.get("type"), f.get("endpoint"), f.get("payload"))
+            if key in existing:
+                continue
+            existing.add(key)
+            evidence = str(f.get("evidence", ""))
+            self.scanner._record_finding(
+                endpoint=str(f.get("endpoint", "")),
+                method=str(f.get("method", "")),
+                payload=str(f.get("payload", "")),
+                indicators=[f"agent_reported:{f.get('confidence', 'unknown')}"],
+                details=[evidence] if evidence else [],
+                vuln_type=str(f.get("type", "")),
+            )
+            added += 1
+        return added
+
+    def run_with_agents(
+        self,
+        *,
+        timeout_per_phase: int = 120,
+        verify: bool = True,
+        verify_votes: int = 3,
+    ) -> dict[str, Any]:
+        """Run the four-phase workflow, spawning one Hermes sub-agent per phase.
+
+        This is the autonomous (headless) path. Each phase's guidance is built
+        **lazily from the current scanner state**, so a phase reflects what the
+        previous phase's agent discovered. Sub-agents share the orchestrator's
+        state file and ScannerDB (see :meth:`_build_agent_prompt`), and each
+        agent also emits a machine-readable ``<FINDINGS>`` block that the
+        orchestrator parses and merges centrally — so feed-forward is robust
+        even if an agent forgets to persist via the shared DB.
+
+        When ``verify`` is set, every merged finding is then put through an
+        adversarial verification pass (:meth:`verify_findings`): a panel of
+        skeptic sub-agents tries to refute it, and findings the majority can
+        refute are dropped from the confirmed set.
+
+        For an interactive Hermes session, prefer the in-process flow
+        (``get_recon_guidance()`` … executed by the running agent itself) —
+        no sub-processes are spawned there.
         """
         print(f"\n{'#' * 60}")
         print(f"# SKILL ORCHESTRATOR WITH AGENTS — {self.target_url}")
         print(f"{'#' * 60}")
 
-        phases = self.run_all_phases()
         results: dict[str, str] = {}
 
-        for guidance in phases:
+        for phase in self.PHASES:
+            # Build guidance NOW so it includes findings the previous agent persisted.
+            guidance = self._guidance_for(phase)
+
             print(f"\n{'=' * 60}")
-            print(f"[{guidance.phase.upper()}] Spawning Hermes sub-agent...")
+            print(f"[{phase.upper()}] Spawning Hermes sub-agent...")
             print(f"{'=' * 60}")
 
-            response = self.spawn_agent(guidance, timeout=timeout_per_phase)
-            results[guidance.phase] = response[:2000]
+            try:
+                response = self.spawn_agent(guidance, timeout=timeout_per_phase)
+            except self.HermesNotFoundError as e:
+                print(f"[!] {e}")
+                final = self.collect_results()
+                final["agent_responses"] = results
+                final["agent_error"] = str(e)
+                return final
 
-            print(f"\n[{guidance.phase.upper()}] Response preview:")
+            results[phase] = response[:2000]
+            print(f"\n[{phase.upper()}] Response preview:")
             print(response[:500])
+
+            # Order matters: first pull in anything the sub-agent persisted to
+            # the shared store directly, THEN merge its declared <FINDINGS> on
+            # top and persist the result — otherwise the next reload would
+            # clobber the in-memory merge (which only touched memory + DB).
+            self._reload_state()
+            merged = self._merge_agent_findings(self._parse_findings(response))
+            if merged:
+                print(f"[{phase}] Merged {merged} reported finding(s)")
+                self.scanner._save_state()
 
         final = self.collect_results()
         final["agent_responses"] = results
 
+        if verify:
+            verdicts = self.verify_findings(votes=verify_votes, timeout=timeout_per_phase)
+            final["verification"] = verdicts
+            final["confirmed_findings"] = [v["finding"] for v in verdicts if not v["refuted"]]
+            final["refuted_findings"] = [v["finding"] for v in verdicts if v["refuted"]]
+
         self.save_results()
         return final
+
+    @staticmethod
+    def _build_verify_prompt(finding: dict[str, Any], target_url: str) -> str:
+        """Prompt a skeptic sub-agent to REFUTE a single finding."""
+        import json as _json
+
+        return "\n".join(
+            [
+                "You are an adversarial verifier. Your job is to REFUTE the claim below,",
+                "not to confirm it. Re-test it independently against the target and decide",
+                "whether it actually reproduces. Default to refuted=true when uncertain.",
+                "",
+                f"Target: {target_url}",
+                "## Claimed finding",
+                _json.dumps(finding, indent=2, default=str)[:800],
+                "",
+                "## Required output",
+                f"End with a verdict block: <{SkillOrchestrator.VERDICT_TAG}>"
+                '{"refuted": true|false, "reason": "..."}'
+                f"</{SkillOrchestrator.VERDICT_TAG}>",
+            ]
+        )
+
+    def verify_finding(
+        self, finding: dict[str, Any], *, votes: int = 3, timeout: int = 60
+    ) -> dict[str, Any]:
+        """Spawn ``votes`` skeptic sub-agents and refute by majority.
+
+        Returns ``{"finding", "refuted", "votes"}``. A finding is refuted when a
+        majority of verifiers say so (ties favour keeping the finding).
+        """
+        prompt = self._build_verify_prompt(finding, self.target_url)
+
+        verdicts: list[dict[str, Any]] = []
+        refuted_count = 0
+        for _ in range(max(1, votes)):
+            response = self._run_hermes(prompt, timeout=timeout, label="verify")
+            verdict = self._extract_tagged_json(response, self.VERDICT_TAG)
+            if isinstance(verdict, dict):
+                verdicts.append(verdict)
+                if verdict.get("refuted") is True:
+                    refuted_count += 1
+
+        refuted = refuted_count > (len(verdicts) / 2) if verdicts else False
+        return {"finding": finding, "refuted": refuted, "votes": verdicts}
+
+    def verify_findings(
+        self,
+        findings: list[dict[str, Any]] | None = None,
+        *,
+        votes: int = 3,
+        timeout: int = 60,
+    ) -> list[dict[str, Any]]:
+        """Adversarially verify findings (defaults to all current findings)."""
+        targets = findings if findings is not None else list(self.scanner.findings)
+        if not targets:
+            return []
+        print(f"\n[verify] Adversarially verifying {len(targets)} finding(s), {votes} votes each")
+        results: list[dict[str, Any]] = []
+        for finding in targets:
+            try:
+                results.append(self.verify_finding(finding, votes=votes, timeout=timeout))
+            except self.HermesNotFoundError as e:
+                print(f"[verify] aborted: {e}")
+                # Without verifiers we cannot refute — keep findings unverified.
+                return [{"finding": f, "refuted": False, "votes": []} for f in targets]
+        return results

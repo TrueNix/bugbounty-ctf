@@ -209,11 +209,37 @@ WORDLIST_SOURCES: dict[str, dict[str, str | list[str]]] = {
 }
 
 
-class WordlistLoader:
-    """Download and cache payload wordlists from remote sources.
+def _bundled_dirs() -> list[str]:
+    """Candidate read-only directories that ship the bundled wordlists.
 
-    Downloads from SecLists on first use, caches at ~/.hermes/wordlists/.
-    Falls back to built-in dictionaries if download fails.
+    Ordered by preference. The package-relative location is the only one that
+    survives every deployment shape:
+      - editable install / dev checkout: src/bugbounty_ctf/wordlists/
+      - pip wheel: site-packages/bugbounty_ctf/wordlists/ (package data)
+      - Hermes skill copy: .../bugbounty-ctf/src/bugbounty_ctf/wordlists/
+
+    The legacy repo-root location (../../wordlists) is kept as a fallback so
+    older checkouts that still place wordlists at the repo root keep working.
+    """
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    return [
+        os.path.join(pkg_dir, "wordlists"),
+        os.path.join(os.path.dirname(os.path.dirname(pkg_dir)), "wordlists"),
+    ]
+
+
+class WordlistLoader:
+    """Load payload wordlists, preferring bundled lists over remote download.
+
+    Resolution order for ``load(vuln_type)``:
+      1. In-memory cache.
+      2. Bundled wordlist shipped inside the package (read-only, offline).
+      3. Previously downloaded copy in the writable cache dir.
+      4. Fresh download from SecLists into the writable cache dir.
+      5. Built-in fallback dictionary.
+
+    The bundled source and the writable download cache are kept separate so
+    the loader never tries to write into a read-only install location.
     """
 
     def __init__(
@@ -222,14 +248,8 @@ class WordlistLoader:
         *,
         timeout: int = 30,
     ) -> None:
-        if cache_dir is None:
-            pkg_dir = os.path.dirname(os.path.abspath(__file__))
-            bundled = os.path.join(os.path.dirname(os.path.dirname(pkg_dir)), "wordlists")
-            if os.path.isdir(bundled):
-                cache_dir = bundled
-            else:
-                cache_dir = os.path.expanduser("~/.hermes/wordlists")
-        self.cache_dir = str(cache_dir)
+        self.cache_dir = str(cache_dir or os.path.expanduser("~/.hermes/wordlists"))
+        self.bundled_dirs = [d for d in _bundled_dirs() if os.path.isdir(d)]
         self.timeout = timeout
         self._cache: dict[str, list[str]] = {}
         self._session = requests.Session()
@@ -237,6 +257,14 @@ class WordlistLoader:
 
     def _cache_path(self, vuln_type: str) -> str:
         return os.path.join(self.cache_dir, f"{vuln_type}.txt")
+
+    def _bundled_path(self, vuln_type: str) -> str | None:
+        """Return the path to a bundled wordlist if one exists."""
+        for d in self.bundled_dirs:
+            candidate = os.path.join(d, f"{vuln_type}.txt")
+            if os.path.exists(candidate):
+                return candidate
+        return None
 
     def _download(self, url: str, cache_path: str) -> bool:
         try:
@@ -261,6 +289,16 @@ class WordlistLoader:
         if not source:
             print(f"  [-] Unknown wordlist type: {vuln_type}")
             return []
+
+        # Prefer the bundled, shipped wordlist (offline, no network). Skipped
+        # when the caller explicitly forces a fresh download.
+        if not force_download:
+            bundled = self._bundled_path(vuln_type)
+            if bundled:
+                payloads = self.load_file(bundled)
+                if payloads:
+                    self._cache[vuln_type] = payloads
+                    return payloads
 
         cache_path = self._cache_path(vuln_type)
 

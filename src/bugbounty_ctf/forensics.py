@@ -315,8 +315,8 @@ class ForensicsToolkit:
                     print(f"  [zsteg] [FLAG] {f}")
 
         # steghide for JPEG (needs password)
-        stdout, _, _ = _run_cmd(["steghide", "extract", "-sf", path, "-p", "", "-f"])
-        if "wrote extracted data" in stdout.lower() or os.path.exists("steghide_extracted.txt"):
+        stdout, stderr, _ = _run_cmd(["steghide", "extract", "-sf", path, "-p", "", "-f"])
+        if "wrote extracted data" in (stdout + stderr).lower():
             finding = ForensicFinding(
                 tool="steghide",
                 finding_type="stego_steghide",
@@ -326,8 +326,8 @@ class ForensicsToolkit:
             print("  [steghide] Extracted with empty password")
 
         for password in ["password", "admin", "secret", "123456", "flag"]:
-            stdout, _, _ = _run_cmd(["steghide", "extract", "-sf", path, "-p", password, "-f"])
-            if "wrote extracted data" in stdout.lower():
+            stdout, stderr, _ = _run_cmd(["steghide", "extract", "-sf", path, "-p", password, "-f"])
+            if "wrote extracted data" in (stdout + stderr).lower():
                 finding = ForensicFinding(
                     tool="steghide",
                     finding_type="stego_steghide",
@@ -363,7 +363,7 @@ class ForensicsToolkit:
             print("  [volatility] Processes found")
 
         # Search for credentials
-        stdout, _, _ = _run_cmd(["volatility3", "-f", path, "windows.hashdump.HashDump"])
+        stdout, _, rc = _run_cmd(["volatility3", "-f", path, "windows.hashdump.HashDump"])
         if rc == 0 and stdout.strip():
             finding = ForensicFinding(
                 tool="volatility", finding_type="password_hashes", value=stdout.strip()[:500]

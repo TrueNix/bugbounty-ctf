@@ -143,7 +143,11 @@ class Orchestrator:
         seen: set[tuple[Any, ...]] = set()
         unique_forms: list[dict[str, Any]] = []
         for f in all_forms:
-            key: tuple[Any, ...] = (f["action"], f["method"], tuple(i["name"] for i in f["inputs"]))
+            key: tuple[Any, ...] = (
+                f.get("action"),
+                f.get("method"),
+                tuple(i.get("name") for i in f.get("inputs", [])),
+            )
             if key not in seen:
                 seen.add(key)
                 unique_forms.append(f)
@@ -515,7 +519,9 @@ class Orchestrator:
             host = self.scanner.host
             path = os.path.expanduser(f"~/.hermes/reports/orchestrator_{host}_{ts}.json")
 
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(path, "w") as f:
             f.write(self.report.to_json())
         print(f"[*] Report saved to {path}")

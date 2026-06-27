@@ -171,11 +171,35 @@ class CryptoToolkit:
             print(f"    [FLAG] {flags}")
         return result
 
+    @staticmethod
+    def _integer_nth_root(x: int, n: int) -> int:
+        """Return floor(x ** (1/n)) for non-negative integer x, n >= 1.
+
+        Uses binary search on integers so it stays exact for ciphertexts far
+        larger than float can represent (real RSA moduli overflow ``c ** (1.0/e)``
+        or lose precision, which the old ±2 correction window could not recover).
+        """
+        if n < 1:
+            raise ValueError("n must be >= 1")
+        if x < 0:
+            raise ValueError("x must be >= 0")
+        if x == 0:
+            return 0
+        hi = 1 << ((x.bit_length() + n - 1) // n)
+        lo = hi >> 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if mid**n <= x:
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo
+
     def rsa_small_exponent(self, n: int, e: int, c: int) -> CryptoResult:
         """RSA attack: if e is small and m^e < n, just take the e-th root."""
         if e < 10:
-            root = round(c ** (1.0 / e))
-            for r in range(root - 2, root + 3):
+            root = self._integer_nth_root(c, e)
+            for r in range(max(root - 2, 0), root + 3):
                 if r**e == c:
                     try:
                         plaintext = bytes.fromhex(hex(r)[2:]).decode("utf-8", errors="replace")
@@ -202,17 +226,22 @@ class CryptoToolkit:
 
     def rsa_common_modulus(self, n: int, e1: int, e2: int, c1: int, c2: int) -> CryptoResult:
         """RSA common modulus attack: same n, different e."""
-        g, x, _ = self._extended_gcd(e1, e2)
+        g, x, y = self._extended_gcd(e1, e2)
         if g != 1:
             result = CryptoResult(operation="rsa_common_modulus", success=False)
             self.results.append(result)
             return result
 
+        # Bezout: e1*x + e2*y = 1, so m = c1^x * c2^y mod n. A negative
+        # coefficient means the corresponding ciphertext must be inverted first.
         if x < 0:
             c1 = self._modinv(c1, n)
             x = -x
+        if y < 0:
+            c2 = self._modinv(c2, n)
+            y = -y
 
-        m = (pow(c1, x, n) * pow(c2, 1, n)) % n
+        m = (pow(c1, x, n) * pow(c2, y, n)) % n
         try:
             plaintext = bytes.fromhex(hex(m)[2:]).decode("utf-8", errors="replace")
         except Exception:

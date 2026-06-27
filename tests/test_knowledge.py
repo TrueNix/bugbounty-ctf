@@ -82,6 +82,15 @@ class TestGetDoc:
     def test_get_nonexistent_doc_returns_none(self, temp_kb: KnowledgeBase) -> None:
         assert temp_kb.get_doc("nonexistent.md") is None
 
+    def test_path_traversal_is_blocked(self, temp_kb: KnowledgeBase) -> None:
+        # A filename escaping the references dir must not read arbitrary files,
+        # even though /etc/passwd exists on the host.
+        assert temp_kb.get_doc("../../../../etc/passwd") is None
+        assert temp_kb.get_doc("../conftest.py") is None
+
+    def test_absolute_path_is_blocked(self, temp_kb: KnowledgeBase) -> None:
+        assert temp_kb.get_doc("/etc/passwd") is None
+
 
 class TestDbIsolation:
     def test_separate_db_instances(self, tmp_path: Path) -> None:

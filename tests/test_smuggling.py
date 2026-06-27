@@ -40,3 +40,22 @@ class TestSmugglingDetector:
         detector = SmugglingDetector("http://nonexistent.invalid/")
         result = detector.exploit_store_response("/api/secret")
         assert "success" in result
+
+
+class TestHostHeader:
+    def test_plain_host(self) -> None:
+        assert SmugglingDetector("http://target.test/")._host_header() == "target.test"
+
+    def test_host_with_port(self) -> None:
+        assert SmugglingDetector("http://target.test:8080/x")._host_header() == "target.test:8080"
+
+    def test_credentials_are_stripped(self) -> None:
+        # The old split("//")[1] leaked user:pass@ into the Host header.
+        assert SmugglingDetector("http://user:pass@target.test/")._host_header() == "target.test"
+
+    def test_ipv6_literal_is_bracketed(self) -> None:
+        assert SmugglingDetector("http://[::1]:9000/")._host_header() == "[::1]:9000"
+
+    def test_connect_target_defaults_https_port(self) -> None:
+        host, port, tls = SmugglingDetector("https://target.test/")._connect_target()
+        assert (host, port, tls) == ("target.test", 443, True)

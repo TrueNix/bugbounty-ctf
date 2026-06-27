@@ -7,8 +7,10 @@ across tests, preserving state and findings. If omitted, a fresh scanner is crea
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 from bugbounty_ctf.engine import ResponseDiff, SecurityScanner, derive_base_url
+from bugbounty_ctf.wordlists import WordlistLoader
 
 
 def _get_scanner(url: str, scanner: SecurityScanner | None = None) -> SecurityScanner:
@@ -417,6 +419,235 @@ def test_ssrf(
         else:
             print(f"[-] No change: {name}")
 
+    return results
+
+
+def test_cors(
+    url: str,
+    *,
+    scanner: SecurityScanner | None = None,
+    evil_origin: str = "https://evil.example",
+) -> list[dict[str, Any]]:
+    """Test an endpoint for CORS misconfigurations.
+
+    Sends a series of crafted ``Origin`` headers and inspects the
+    ``Access-Control-Allow-Origin`` (ACAO) and ``Access-Control-Allow-Credentials``
+    (ACAC) response headers. Flags the classic high-impact patterns:
+
+    - ACAO reflects an arbitrary attacker origin (origin reflection)
+    - ACAO is ``*`` while ACAC is ``true`` (credentialed wildcard — invalid but seen)
+    - ACAO reflects an attacker origin together with ACAC ``true`` (full ATO surface)
+    - ACAO trusts ``null`` (exploitable via sandboxed iframes/data URLs)
+    - Naive prefix/suffix/substring trust of the target host
+
+    Returns one result dict per tested origin that produced an ACAO reflection.
+    """
+    scanner = _get_scanner(url, scanner)
+    host = urlparse(url).hostname or ""
+
+    origins = {
+        "arbitrary": evil_origin,
+        "null": "null",
+        "subdomain_prefix": f"https://{host}.evil.example",
+        "suffix_match": f"https://evil{host}",
+        "substring": f"https://{host}evil.example",
+    }
+
+    print(f"[*] Testing CORS on {url}")
+    results: list[dict[str, Any]] = []
+
+    for name, origin in origins.items():
+        r = scanner._make_request("GET", url, headers={"Origin": origin})
+        acao = r.headers.get("Access-Control-Allow-Origin", "")
+        acac = r.headers.get("Access-Control-Allow-Credentials", "").lower() == "true"
+
+        reflected = acao == origin or (acao == "*" and acac)
+        if not reflected:
+            continue
+
+        if acao == "*" and acac:
+            severity, note = "high", "wildcard ACAO with credentials"
+        elif acao == origin and acac:
+            severity, note = "critical", "attacker origin reflected with credentials"
+        elif acao == "null":
+            severity, note = "medium", "null origin trusted"
+        elif acao == origin:
+            severity, note = "medium", "attacker origin reflected (no credentials)"
+        else:
+            severity, note = "low", "wildcard ACAO"
+
+        print(f"[!] CORS {severity.upper()}: {name} → ACAO={acao!r} ACAC={acac} ({note})")
+        finding = {
+            "test": name,
+            "origin": origin,
+            "acao": acao,
+            "acac": acac,
+            "severity": severity,
+            "note": note,
+        }
+        results.append(finding)
+        scanner._record_finding(
+            url, "GET", f"Origin: {origin}", ["cors_misconfig", note], [note], "cors"
+        )
+
+    if not results:
+        print("[-] No CORS misconfiguration detected")
+    return results
+
+
+def discover_content(
+    base_url: str,
+    *,
+    scanner: SecurityScanner | None = None,
+    wordlist: list[str] | None = None,
+    extensions: list[str] | None = None,
+    limit: int = 0,
+) -> list[dict[str, Any]]:
+    """Brute-force content/paths against a target using a wordlist.
+
+    Loads the bundled ``dirbrute`` wordlist by default (overridable via
+    ``wordlist``) and requests each candidate path, reporting entries that are
+    not 404s. To avoid the PHP-dev-server false-positive trap (every path
+    returns 200 with identical length — see the methodology notes), responses
+    whose ``(status, length)`` pair matches a dominant baseline signature are
+    filtered out.
+
+    Args:
+        base_url: Target origin (path component is ignored).
+        scanner: Optional shared scanner.
+        wordlist: Explicit candidate list; defaults to the bundled dirbrute list.
+        extensions: Optional extensions to append to each word (e.g. ['php','bak']).
+        limit: If > 0, cap the number of words tried (useful for quick passes).
+    """
+    scanner = _get_scanner(base_url, scanner)
+    origin = derive_base_url(base_url)
+
+    words = wordlist if wordlist is not None else WordlistLoader().load("dirbrute")
+    if limit > 0:
+        words = words[:limit]
+
+    candidates: list[str] = []
+    for w in words:
+        w = w.strip().lstrip("/")
+        if not w:
+            continue
+        candidates.append(w)
+        for ext in extensions or []:
+            candidates.append(f"{w}.{ext.lstrip('.')}")
+
+    print(f"[*] Content discovery on {origin} — {len(candidates)} candidates")
+
+    raw: list[dict[str, Any]] = []
+    signature_counts: dict[tuple[int, int], int] = {}
+    for path in candidates:
+        target = urljoin(origin + "/", path)
+        r = scanner._make_request("GET", target)
+        if r.status_code in (404, 0):
+            continue
+        sig = (r.status_code, len(r.text))
+        signature_counts[sig] = signature_counts.get(sig, 0) + 1
+        raw.append(
+            {
+                "path": path,
+                "url": target,
+                "status": r.status_code,
+                "length": len(r.text),
+                "location": r.headers.get("Location", ""),
+                "_sig": sig,
+            }
+        )
+
+    # Drop the dominant signature when it swamps results — that is the
+    # catch-all routing pattern, not real discovered content.
+    dominant: tuple[int, int] | None = None
+    if signature_counts:
+        top_sig, top_count = max(signature_counts.items(), key=lambda kv: kv[1])
+        if top_count > 10 and top_count > len(raw) * 0.5:
+            dominant = top_sig
+
+    results: list[dict[str, Any]] = []
+    for item in raw:
+        if dominant is not None and item["_sig"] == dominant:
+            continue
+        item.pop("_sig", None)
+        results.append(item)
+        print(f"[+] {item['status']}  {item['length']:>7}  /{item['path']}")
+
+    if dominant is not None:
+        print(f"[*] Filtered {len(raw) - len(results)} catch-all responses (sig={dominant})")
+    print(f"[*] {len(results)} interesting paths found")
+    return results
+
+
+def test_open_redirect(
+    url: str,
+    *,
+    scanner: SecurityScanner | None = None,
+    params: list[str] | None = None,
+    evil_host: str = "evil.example",
+) -> list[dict[str, Any]]:
+    """Test an endpoint for open redirect via redirect-style parameters.
+
+    Sends a range of redirect payloads (absolute, scheme-relative, backslash and
+    whitespace tricks, and a credential-prefix bypass) in each candidate
+    parameter, with redirects disabled, and confirms the ``Location`` header
+    actually points the browser at the attacker-controlled host.
+
+    Args:
+        url: Target endpoint.
+        scanner: Optional shared scanner.
+        params: Redirect parameter names to try; defaults to a common set.
+        evil_host: Attacker host to look for in the resulting Location.
+    """
+    scanner = _get_scanner(url, scanner)
+    redirect_params = params or [
+        "next",
+        "url",
+        "redirect",
+        "redirect_uri",
+        "return",
+        "returnTo",
+        "dest",
+        "destination",
+        "continue",
+        "r",
+        "u",
+    ]
+    payloads = {
+        "absolute": f"https://{evil_host}",
+        "scheme_relative": f"//{evil_host}",
+        "backslash": f"/\\{evil_host}",
+        "whitespace": f"https:/{evil_host}",
+        "at_bypass": f"https://expected.test@{evil_host}",
+        "subdomain_bypass": f"https://{evil_host}/expected.test",
+    }
+
+    print(f"[*] Testing open redirect on {url}")
+    results: list[dict[str, Any]] = []
+
+    for param in redirect_params:
+        for name, payload in payloads.items():
+            r = scanner._make_request("GET", url, params={param: payload}, allow_redirects=False)
+            if r.status_code not in (301, 302, 303, 307, 308):
+                continue
+            location = r.headers.get("Location", "")
+            dest_host = urlparse(location).hostname or ""
+            if dest_host == evil_host:
+                print(f"[!] OPEN REDIRECT: {param}={payload!r} → {location}")
+                finding = {
+                    "param": param,
+                    "payload_type": name,
+                    "payload": payload,
+                    "location": location,
+                    "status": r.status_code,
+                }
+                results.append(finding)
+                scanner._record_finding(
+                    url, "GET", f"{param}={payload}", ["open_redirect"], [location], "open_redirect"
+                )
+
+    if not results:
+        print("[-] No open redirect detected")
     return results
 
 

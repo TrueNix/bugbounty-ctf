@@ -25,8 +25,34 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import requests
+import urllib3
+
+# OSINT scans deliberately hit hosts with broken/absent TLS (verify=False);
+# silence the per-request InsecureRequestWarning so it does not bury findings.
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 FLAG_PATTERNS = [r"HTB\{[^}]+\}", r"flag\{[^}]+\}", r"CTF\{[^}]+\}", r"pwn\{[^}]+\}"]
+
+# Response signatures of SaaS providers that serve an "unclaimed resource" page
+# when a dangling CNAME points at a deprovisioned target. Used by
+# OSINTToolkit.check_subdomain_takeover.
+TAKEOVER_FINGERPRINTS: dict[str, list[str]] = {
+    "GitHub Pages": ["There isn't a GitHub Pages site here"],
+    "Heroku": ["No such app", "herokucdn.com/error-pages/no-such-app.html"],
+    "AWS S3": ["NoSuchBucket", "The specified bucket does not exist"],
+    "Fastly": ["Fastly error: unknown domain"],
+    "Shopify": ["Sorry, this shop is currently unavailable"],
+    "Tumblr": ["Whatever you were looking for doesn't currently exist at this address"],
+    "Bitbucket": ["Repository not found"],
+    "Pantheon": ["The gods are wise, but do not know of the site which you seek"],
+    "Surge.sh": ["project not found"],
+    "Ghost": ["The thing you were looking for is no longer here"],
+    "Unbounce": ["The requested URL was not found on this server"],
+    "Readme.io": ["Project doesnt exist... yet!"],
+    "Webflow": ["The page you are looking for doesn't exist or has been moved"],
+    "Wordpress.com": ["Do you want to register"],
+    "Acquia": ["The site you are looking for could not be found"],
+}
 
 GOOGLE_DORK_TEMPLATES = [
     "site:{domain} filetype:pdf",
@@ -376,6 +402,48 @@ class OSINTToolkit:
             print(f"  [-] Fingerprint error: {e}")
 
         return tech
+
+    def check_subdomain_takeover(self, subdomain: str) -> dict[str, Any]:
+        """Check a subdomain for a dangling-resource takeover fingerprint.
+
+        Fetches the host and matches the response against signatures of common
+        SaaS providers that serve an "unclaimed resource" page when a CNAME
+        points at a deprovisioned target — the classic subdomain-takeover
+        precondition. A match is a strong (but not absolute) indicator; always
+        confirm the CNAME and claim path before reporting.
+        """
+        print(f"[*] Subdomain takeover check for {subdomain}")
+        body = ""
+        for scheme in ("https", "http"):
+            try:
+                r = self.session.get(f"{scheme}://{subdomain}", timeout=self.timeout, verify=False)
+                body = r.text
+                if body:
+                    break
+            except requests.exceptions.RequestException:
+                continue
+
+        result: dict[str, Any] = {"subdomain": subdomain, "vulnerable": False}
+        if not body:
+            return result
+
+        for service, signatures in TAKEOVER_FINGERPRINTS.items():
+            for sig in signatures:
+                if sig.lower() in body.lower():
+                    result.update({"vulnerable": True, "service": service, "evidence": sig})
+                    print(f"  [!] Possible {service} takeover: matched {sig!r}")
+                    self.findings.append(
+                        OSINTFinding(
+                            source="subdomain_takeover",
+                            finding_type="takeover",
+                            value=f"{subdomain} → {service}",
+                            details={"service": service, "evidence": sig},
+                        )
+                    )
+                    return result
+
+        print("  [-] No takeover fingerprint matched")
+        return result
 
     def extract_metadata(self, file_path: str) -> dict[str, Any]:
         """Extract metadata from a file (images, documents, PDFs)."""

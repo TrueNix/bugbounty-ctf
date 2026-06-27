@@ -30,6 +30,7 @@ class RecordedRequest:
     method: str
     url: str
     headers: dict[str, str] = field(default_factory=dict)
+    params: dict[str, str] = field(default_factory=dict)
     body: str = ""
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
@@ -44,6 +45,7 @@ class RecordedRequest:
             "method": self.method,
             "url": self.url,
             "headers": self.headers,
+            "params": self.params,
             "body": self.body[:1000],
             "timestamp": self.timestamp,
             "status_code": self.status_code,
@@ -76,13 +78,16 @@ class SessionRecorder:
 
             data = kwargs.get("data")
             params = kwargs.get("params")
+            headers = kwargs.get("headers")
             if data:
                 if isinstance(data, dict):
                     record.body = json.dumps(data)
                 else:
                     record.body = str(data)
             if params and isinstance(params, dict):
-                record.headers = dict(params)
+                record.params = dict(params)
+            if headers and isinstance(headers, dict):
+                record.headers = dict(headers)
 
             start = time.time()
             response = self._original_make_request(method, url, **kwargs)
@@ -127,7 +132,26 @@ class SessionRecorder:
         for record in records[:50]:
             method = record["method"]
             url = record["url"]
-            response = self._scanner._make_request(method, url)
+
+            # Reconstruct the original request shape so the replay actually
+            # exercises the same endpoint — earlier versions dropped query
+            # params and bodies, so every GET-with-params replayed against the
+            # bare URL and produced a meaningless diff.
+            kwargs: dict[str, Any] = {}
+            params = record.get("params")
+            if params:
+                kwargs["params"] = params
+            headers = record.get("headers")
+            if headers:
+                kwargs["headers"] = headers
+            body = record.get("body")
+            if body and method.upper() in ("POST", "PUT", "PATCH"):
+                try:
+                    kwargs["data"] = json.loads(body)
+                except (json.JSONDecodeError, ValueError):
+                    kwargs["data"] = body
+
+            response = self._scanner._make_request(method, url, **kwargs)
 
             match = response.status_code == record["status_code"]
             results.append(

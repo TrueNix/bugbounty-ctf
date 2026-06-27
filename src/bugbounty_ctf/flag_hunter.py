@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import re
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -176,7 +177,7 @@ class FlagHunter:
             for line in output.strip().split("\n"):
                 line = line.strip()
                 if line:
-                    content = self.run_command(f"cat {line} 2>/dev/null")
+                    content = self.run_command(f"cat {shlex.quote(line)} 2>/dev/null")
                     flags = self._extract_flags(content)
                     if flags:
                         self.result.flags.extend(flags)

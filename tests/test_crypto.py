@@ -43,6 +43,46 @@ class TestRSASmallExponent:
         assert result.success
         assert result.details.get("root") == 12345
 
+    def test_large_message_cube_root(self) -> None:
+        # Regression: a ciphertext this large overflows float `c ** (1.0/e)`,
+        # so the old ±2 correction window could never recover the root. The
+        # integer n-th root must still find it exactly.
+        ct = CryptoToolkit()
+        m = int.from_bytes(b"flag{cube_root_over_a_very_long_plaintext_block}", "big")
+        e = 3
+        c = m**e
+        n = c + 1
+        result = ct.rsa_small_exponent(n=n, e=e, c=c)
+        assert result.success
+        assert result.details.get("root") == m
+
+    def test_integer_nth_root_is_exact(self) -> None:
+        assert CryptoToolkit._integer_nth_root(27, 3) == 3
+        assert CryptoToolkit._integer_nth_root(26, 3) == 2  # floor
+        big = 7**101
+        assert CryptoToolkit._integer_nth_root(big, 101) == 7
+
+
+class TestRSACommonModulus:
+    def test_recovers_message(self) -> None:
+        # Regression: the attack must use BOTH Bezout coefficients
+        # (m = c1^x * c2^y mod n). The old code dropped y and used c2^1,
+        # producing the wrong plaintext for every input.
+        ct = CryptoToolkit()
+        n = 18446744073709551557  # largest prime < 2**64, so gcd(m, n) == 1
+        m = int.from_bytes(b"flag{cm}", "big")
+        e1, e2 = 3, 5  # extended_gcd → x=2, y=-1, exercising the y-inversion path
+        c1 = pow(m, e1, n)
+        c2 = pow(m, e2, n)
+        result = ct.rsa_common_modulus(n, e1, e2, c1, c2)
+        assert result.success
+        assert result.details.get("m") == m
+
+    def test_non_coprime_exponents_fail_cleanly(self) -> None:
+        ct = CryptoToolkit()
+        result = ct.rsa_common_modulus(n=3233, e1=4, e2=6, c1=1, c2=1)
+        assert not result.success
+
 
 class TestXORBruteforce:
     def test_single_byte_xor(self) -> None:

@@ -71,7 +71,8 @@ from bugbounty_ctf import SecurityScanner
 from bugbounty_ctf.api import (
     test_login_sqli, test_ssti, test_command_injection, test_path_traversal,
     test_nosqli, test_ldap_injection, test_ssrf, test_xss, test_idor,
-    test_graphql_alias_batch, map_surface,
+    test_graphql_alias_batch, test_cors, test_open_redirect,
+    discover_content, map_surface,
     detect_defenses, test_race_condition, test_xxe,
     test_pickle_deserialization, test_yaml_deserialization,
     test_jwt_attacks, test_file_upload,
@@ -93,6 +94,9 @@ scanner = SecurityScanner("http://target/")
 - `test_xss(url, method, param_name, scanner=scanner)` — Test for XSS with 8-level filter-bypass escalation
 - `test_idor(url_template, scanner=scanner)` — Test for IDOR (sequential ID probing)
 - `test_graphql_alias_batch(url, query_template, scanner=scanner)` — GraphQL alias-batch brute force
+- `test_cors(url, scanner=scanner)` — Detect CORS misconfigurations (origin reflection, `null` trust, credentialed wildcard)
+- `test_open_redirect(url, scanner=scanner)` — Probe redirect params (next/url/redirect/…) with bypass payloads, confirm Location points off-site
+- `discover_content(base_url, scanner=scanner)` — Directory/content brute force using the bundled `dirbrute` wordlist (auto-filters catch-all routing responses)
 - `map_surface(base_url, scanner=scanner)` — Map attack surface (forms, links, tech)
 
 **Advanced functions:**
@@ -178,6 +182,44 @@ The orchestrator automatically:
 - Injects scanner state (findings, surface, WAF status) into guidance
 - Tracks findings in SQLite (ScannerDB) for cross-target analysis
 - Runs SSRF + AWS metadata extraction when URL parameters are found
+
+#### Autonomous mode: spawn one Hermes sub-agent per phase
+
+For headless/unattended runs (cron, CI, batch targets) where no interactive
+Hermes agent is driving, the orchestrator can spawn a dedicated Hermes
+sub-agent (`hermes -z`) for each phase:
+
+```python
+runner = SkillOrchestrator("http://target/")
+final = runner.run_with_agents(timeout_per_phase=180)  # recon → research → fuzz → exploit → verify
+print(final["total_findings"], final["confirmed_findings"], final["refuted_findings"])
+```
+
+How the sub-agent workflow stays coherent:
+- **Lazy guidance** — each phase's prompt is built from the *current* scanner
+  state, so the fuzz/exploit agent sees what the recon/research agent found
+  (not a stale upfront snapshot).
+- **Structured output contract** — each sub-agent must end its reply with a
+  machine-readable `<FINDINGS>[…]</FINDINGS>` JSON block. The orchestrator
+  parses and merges it (deduped by type+endpoint+payload) so feed-forward is
+  robust even if an agent never touches the shared DB.
+- **Shared persistence** — every sub-agent is also told (via a bootstrap block
+  in its prompt) to construct its `SecurityScanner` with the orchestrator's
+  exact `state_file` and `ScannerDB` path. The orchestrator reloads that state
+  after each phase, so findings genuinely feed forward and the final report
+  aggregates all phases.
+- **Adversarial verification** — with `verify=True` (default), every merged
+  finding is then put to a panel of skeptic sub-agents prompted to *refute* it
+  (`verify_votes` per finding); majority-refuted findings move to
+  `refuted_findings`, the rest to `confirmed_findings`. Cuts plausible-but-wrong
+  results before reporting.
+- **Fails closed** — if the `hermes` binary is missing it raises
+  `SkillOrchestrator.HermesNotFoundError` (caught by `run_with_agents`, which
+  returns an `agent_error`) instead of silently recording empty phases.
+
+Use the in-process `get_*_guidance()` flow when an interactive Hermes agent is
+the reasoning engine; use `run_with_agents()` when nothing is driving and the
+orchestrator must spawn the reasoning agents itself.
 
 ### Phase 1: Reconnaissance (Map the surface)
 
@@ -525,7 +567,13 @@ Many CTF labs are **vulnerability identification exercises**, not flag-capture:
 
 ## Bug Bounty Methodology
 
-1. **Scope check:** Only test in-scope domains.
+1. **Scope check:** Only test in-scope domains. Enforce it mechanically — wrap the scanner in a `ScopeGuard` so out-of-scope requests hard-fail instead of relying on discipline:
+   ```python
+   from bugbounty_ctf import SecurityScanner, ScopeGuard
+   scope = ScopeGuard(["*.example.com", "api.example.org"])  # exact, wildcard, or apex
+   scanner = SecurityScanner("https://app.example.com/", scope=scope)
+   # Any request to a host outside the allowlist raises OutOfScopeError.
+   ```
 2. **Surface mapping:** Every input point — params, headers, cookies, uploads, API endpoints.
 3. **Vulnerability testing:** Follow the order in Step 1.
 4. **Impact demonstration:** Show real impact — data access, account takeover, RCE.

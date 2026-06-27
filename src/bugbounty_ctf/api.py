@@ -64,16 +64,20 @@ from bugbounty_ctf.osint import OSINTToolkit
 from bugbounty_ctf.post_exploit import PostExploit, post_exploit_enum
 from bugbounty_ctf.pwn import PwnToolkit
 from bugbounty_ctf.quick_tests import (
+    discover_content,
     map_surface,
     test_command_injection,
+    test_cors,
     test_ldap_injection,
     test_login_sqli,
     test_nosqli,
+    test_open_redirect,
     test_path_traversal,
     test_ssrf,
     test_ssti,
 )
 from bugbounty_ctf.reverse import ReverseToolkit
+from bugbounty_ctf.scope import OutOfScopeError, ScopeGuard
 from bugbounty_ctf.session_recorder import SessionRecorder
 from bugbounty_ctf.skill_runner import PhaseGuidance, SkillOrchestrator
 from bugbounty_ctf.smuggling import SmugglingDetector
@@ -102,6 +106,7 @@ __all__ = [
     "ObservationStore",
     "Orchestrator",
     "OrchestratorReport",
+    "OutOfScopeError",
     "PhaseGuidance",
     "PhaseResult",
     "PostExploit",
@@ -113,6 +118,7 @@ __all__ = [
     "ReverseToolkit",
     "SSRFPivot",
     "ScannerDB",
+    "ScopeGuard",
     "SecurityScanner",
     "SessionRecorder",
     "SkillOrchestrator",
@@ -127,6 +133,7 @@ __all__ = [
     "derive_base_url",
     "detect_defenses",
     "detect_ssrf_filter",
+    "discover_content",
     "enumerate_aws_metadata",
     "exploit_aws_credentials",
     "forge_jwt_alg_none",
@@ -146,6 +153,7 @@ __all__ = [
     "recommend_next_test",
     "save_report",
     "test_command_injection",
+    "test_cors",
     "test_file_upload",
     "test_graphql_alias_batch",
     "test_idor",
@@ -153,6 +161,7 @@ __all__ = [
     "test_ldap_injection",
     "test_login_sqli",
     "test_nosqli",
+    "test_open_redirect",
     "test_path_traversal",
     "test_pickle_deserialization",
     "test_race_condition",

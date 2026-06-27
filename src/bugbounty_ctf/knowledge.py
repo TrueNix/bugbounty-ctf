@@ -9,6 +9,7 @@ No external dependencies — uses SQLite FTS5 (Python stdlib).
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import sqlite3
@@ -114,7 +115,9 @@ class KnowledgeBase:
         return self._conn
 
     def _init_db(self) -> None:
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        parent = os.path.dirname(self.db_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS docs (
                 id INTEGER PRIMARY KEY,
@@ -294,8 +297,20 @@ class KnowledgeBase:
         ]
 
     def get_doc(self, filename: str) -> str | None:
-        """Retrieve a full reference doc by filename."""
-        path = Path(self.references_dir) / filename
+        """Retrieve a full reference doc by filename.
+
+        Resolves the path and confirms it stays inside the references
+        directory, so a ``filename`` like ``../../../etc/passwd`` (e.g. coming
+        from an agent that processed attacker-controlled page content) cannot
+        read files outside the doc tree.
+        """
+        base = Path(self.references_dir).resolve()
+        try:
+            path = (base / filename).resolve()
+        except (OSError, ValueError):
+            return None
+        if not path.is_relative_to(base):
+            return None
         if path.exists():
             return path.read_text(encoding="utf-8", errors="replace")
         return None
@@ -309,3 +324,15 @@ class KnowledgeBase:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+
+    def __enter__(self) -> KnowledgeBase:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        # Best-effort cleanup so a KnowledgeBase that outlives its caller does
+        # not leak the SQLite connection (most callers never call close()).
+        with contextlib.suppress(Exception):
+            self.close()

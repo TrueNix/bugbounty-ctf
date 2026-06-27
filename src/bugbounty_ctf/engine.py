@@ -20,6 +20,8 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
+from bugbounty_ctf.scope import ScopeGuard
+
 
 @dataclass(frozen=True)
 class TestResult:
@@ -69,6 +71,24 @@ class DiffAnalysis:
             "indicators": self.indicators,
             "differences": self.differences,
         }
+
+
+def response_time(resp: requests.Response) -> float:
+    """Best-effort response time in seconds.
+
+    Prefers the time ``SecurityScanner._make_request`` measures and stamps onto
+    the response; falls back to requests' native ``elapsed`` so a response that
+    never passed through the scanner (a mock, or an externally built
+    ``requests.Response``) still reports a real value instead of silently 0.0.
+    """
+    rt = getattr(resp, "response_time", None)
+    if isinstance(rt, (int, float)):
+        return float(rt)
+    elapsed = getattr(resp, "elapsed", None)
+    try:
+        return elapsed.total_seconds() if elapsed is not None else 0.0
+    except AttributeError:
+        return 0.0
 
 
 class ResponseDiff:
@@ -125,8 +145,7 @@ class ResponseDiff:
         return DiffAnalysis(
             status_changed=self.baseline.status_code != self.test.status_code,
             length_diff=abs(len(self.baseline.text) - len(self.test.text)),
-            timing_diff=getattr(self.test, "response_time", 0.0)
-            - getattr(self.baseline, "response_time", 0.0),
+            timing_diff=response_time(self.test) - response_time(self.baseline),
             content_differs=self.baseline.text != self.test.text,
             interesting=self.interesting,
             indicators=self.indicators,
@@ -156,8 +175,8 @@ class ResponseDiff:
             self.indicators.append("content_appeared")
 
     def _check_timing(self) -> None:
-        base_time = getattr(self.baseline, "response_time", 0.0)
-        test_time = getattr(self.test, "response_time", 0.0)
+        base_time = response_time(self.baseline)
+        test_time = response_time(self.test)
 
         if test_time > base_time * 2 and test_time > 1.0:
             self.differences.append(f"Timing: {base_time:.3f}s → {test_time:.3f}s")
@@ -313,7 +332,10 @@ class ScannerDB:
 
     def __init__(self, db_path: str | None = None) -> None:
         self.db_path = db_path or _default_db_path()
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        # ":memory:" and bare filenames have no directory component.
+        parent = os.path.dirname(self.db_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         self._conn: sqlite3.Connection | None = None
         self._init_schema()
 
@@ -458,9 +480,11 @@ class SecurityScanner:
         delay: float = 0.0,
         respect_waf: bool = True,
         db: ScannerDB | None = None,
+        scope: ScopeGuard | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.host = urlparse(base_url).hostname or "unknown"
+        self.scope = scope
         self.session = session or requests.Session()
         self.state_file = str(state_file or _default_state_file(base_url))
         self.timeout = timeout
@@ -504,7 +528,9 @@ class SecurityScanner:
             "defenses_detected": self.defenses_detected,
             "updated_at": datetime.now().isoformat(),
         }
-        os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
+        parent = os.path.dirname(self.state_file)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(self.state_file, "w") as f:
             json.dump(state, f, indent=2)
 
@@ -575,7 +601,16 @@ class SecurityScanner:
         return None
 
     def _make_request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
-        """Make HTTP request with timing, retry on transient failure, and pacing."""
+        """Make HTTP request with timing, retry on transient failure, and pacing.
+
+        If a :class:`ScopeGuard` is configured, the target is checked first and
+        an out-of-scope URL raises :class:`OutOfScopeError` — a hard stop that
+        is deliberately *not* caught here, so it surfaces to the caller rather
+        than being masked as a failed request.
+        """
+        if self.scope is not None:
+            self.scope.check(url)
+
         delay = self._effective_delay()
 
         for attempt in range(2):
@@ -598,6 +633,7 @@ class SecurityScanner:
         response = requests.Response()
         response.status_code = 0
         response._content = b"Request failed: retries exhausted"
+        response.response_time = 0.0
         return response
 
     def get_baseline(self, method: str, url: str, **kwargs: Any) -> requests.Response:
@@ -1058,9 +1094,13 @@ def confirm_vulnerability(
 
 
 def ip_to_octal(ip: str) -> str:
-    """Convert IP to octal format (127.0.0.1 → 0177.0.0.1)."""
+    """Convert IP to octal format (127.0.0.1 → 0177.0.0.1).
+
+    Each octet keeps a leading ``0`` so parsers recognise it as octal — without
+    it ``127`` becomes ``177`` (a different, decimal address) instead of ``0177``.
+    """
     parts = ip.split(".")
-    return ".".join(str(oct(int(p))[2:]) for p in parts)
+    return ".".join(f"0{oct(int(p))[2:]}" for p in parts)
 
 
 def ip_to_decimal(ip: str) -> str:

@@ -97,6 +97,20 @@ def _run_cmd(cmd: list[str], timeout: int = 30) -> tuple[str, str, int]:
         return "", "", -1
 
 
+# Symbol names are interpolated into radare2 `-c` command strings. r2 treats
+# `;` as a command separator and `!` as a shell escape, so an unvalidated name
+# like "main; !id" would run arbitrary commands. Restrict to characters that
+# can legitimately appear in a symbol name.
+_SYMBOL_RE = re.compile(r"^[A-Za-z0-9_.$@:]+$")
+
+
+def _validate_symbol(function_name: str) -> str:
+    """Return the symbol name if it is r2-command-safe, else raise ValueError."""
+    if not _SYMBOL_RE.match(function_name):
+        raise ValueError(f"Unsafe symbol name {function_name!r}: only [A-Za-z0-9_.$@:] are allowed")
+    return function_name
+
+
 class ReverseToolkit:
     """Reverse engineering automation for CTF binary challenges."""
 
@@ -325,6 +339,7 @@ class ReverseToolkit:
 
     def decompile_function(self, function_name: str) -> str:
         """Decompile a function using radare2 pdc or Ghidra."""
+        function_name = _validate_symbol(function_name)
         stdout, _, _ = _run_cmd(
             [
                 "r2",
@@ -428,6 +443,7 @@ class ReverseToolkit:
 
     def disassemble_function(self, function_name: str) -> str:
         """Disassemble a function using objdump or r2."""
+        function_name = _validate_symbol(function_name)
         stdout, _, _ = _run_cmd(
             [
                 "r2",
