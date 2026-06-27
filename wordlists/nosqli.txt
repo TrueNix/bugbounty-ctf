@@ -1,0 +1,13 @@
+{"$ne": null}
+{"$gt": ""}
+{"$regex": ".*"}
+{"$where": "1==1"}
+{"$ne": ""}
+{"$gt": null}
+{"$exists": true}
+{"$nin": []}
+{"$or": [{"$ne": null}, {"$gt": ""}]}
+{"username": {"$ne": null}, "password": {"$ne": null}}
+{"username": {"$gt": ""}, "password": {"$gt": ""}}
+{"$regex": "admin"}
+{"$where": "this.username == 'admin'"}

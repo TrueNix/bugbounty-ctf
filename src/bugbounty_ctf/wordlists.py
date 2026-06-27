@@ -222,7 +222,14 @@ class WordlistLoader:
         *,
         timeout: int = 30,
     ) -> None:
-        self.cache_dir = str(cache_dir or os.path.expanduser("~/.hermes/wordlists"))
+        if cache_dir is None:
+            pkg_dir = os.path.dirname(os.path.abspath(__file__))
+            bundled = os.path.join(os.path.dirname(os.path.dirname(pkg_dir)), "wordlists")
+            if os.path.isdir(bundled):
+                cache_dir = bundled
+            else:
+                cache_dir = os.path.expanduser("~/.hermes/wordlists")
+        self.cache_dir = str(cache_dir)
         self.timeout = timeout
         self._cache: dict[str, list[str]] = {}
         self._session = requests.Session()

