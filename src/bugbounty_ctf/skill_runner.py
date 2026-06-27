@@ -1,20 +1,22 @@
 """Hermes skill integration for security testing.
 
-When installed as a Hermes skill, the Hermes agent itself IS the reasoning
-engine. This module provides phase guidance with RAG context and scanner
-state, but does NOT prescribe specific actions. The agent decides what to
-test based on what it discovered.
+Spawns Hermes sub-agents for each phase of security testing. Each sub-agent
+gets its own context window with RAG context injected and the available
+toolkit functions. The orchestrator coordinates between phases and feeds
+findings forward.
 
-The orchestrator is target-agnostic. It presents:
-- What was discovered (forms, links, tech, findings)
-- What tools are available
-- What the knowledge base suggests
-The agent decides what to do with that information.
+Agent spawning uses `hermes -z` (one-shot mode) with the main model
+configured in Hermes config (qwen3.7-plus via alibaba-coding-plan).
+
+The orchestrator is target-agnostic — it discovers what's there and
+lets each sub-agent decide what to test based on what it found.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -240,3 +242,99 @@ class SkillOrchestrator:
             self.get_fuzz_guidance(),
             self.get_exploit_guidance(),
         ]
+
+    def spawn_agent(self, guidance: PhaseGuidance, *, timeout: int = 120) -> str:
+        """Spawn a Hermes sub-agent for a phase using `hermes -z`.
+
+        The sub-agent gets the phase guidance as a one-shot prompt,
+        including RAG context, scanner state, and available tools.
+        The sub-agent executes using the main Hermes model.
+        """
+        prompt = self._build_agent_prompt(guidance)
+
+        cmd = ["hermes", "-z", prompt, "--yolo"]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env={**os.environ, "HERMES_NO_STREAM": "1"},
+            )
+            response = result.stdout.strip()
+            print(f"[{guidance.phase}] Agent response: {len(response)} chars")
+            return response
+        except subprocess.TimeoutExpired:
+            return f"[TIMEOUT after {timeout}s]"
+        except Exception as e:
+            return f"[ERROR: {e}]"
+
+    @staticmethod
+    def _build_agent_prompt(guidance: PhaseGuidance) -> str:
+        """Build a prompt for the Hermes sub-agent from phase guidance."""
+        import json as _json
+
+        lines = [
+            f"You are a security testing agent for the {guidance.phase} phase.",
+            "",
+            "## Discovered so far",
+            _json.dumps(guidance.discovered, indent=2, default=str)[:1000],
+            "",
+            "## Available tools",
+        ]
+
+        for tool in guidance.available_tools:
+            lines.append(f"  - {tool}")
+
+        if guidance.rag_context:
+            lines.extend(["", "## Methodology from knowledge base", guidance.rag_context[:500]])
+
+        if guidance.scanner_state:
+            lines.extend(["", "## Current scanner state", guidance.scanner_state])
+
+        if guidance.previous_findings:
+            lines.extend(["", "## Previous findings"])
+            for f in guidance.previous_findings[:10]:
+                lines.append(f"  - {f.get('type', '?')}: {f.get('endpoint', '?')}")
+
+        lines.extend(
+            [
+                "",
+                "## Your task",
+                f"Execute the {guidance.phase} phase. Use the available tools.",
+                "Report findings as structured text with type, endpoint, payload, and evidence.",
+            ]
+        )
+
+        return "\n".join(lines)
+
+    def run_with_agents(self, *, timeout_per_phase: int = 120) -> dict[str, Any]:
+        """Run all phases with Hermes sub-agents.
+
+        Each phase spawns a Hermes sub-agent that gets the guidance prompt.
+        Findings from each phase feed into the next.
+        """
+        print(f"\n{'#' * 60}")
+        print(f"# SKILL ORCHESTRATOR WITH AGENTS — {self.target_url}")
+        print(f"{'#' * 60}")
+
+        phases = self.run_all_phases()
+        results: dict[str, str] = {}
+
+        for guidance in phases:
+            print(f"\n{'=' * 60}")
+            print(f"[{guidance.phase.upper()}] Spawning Hermes sub-agent...")
+            print(f"{'=' * 60}")
+
+            response = self.spawn_agent(guidance, timeout=timeout_per_phase)
+            results[guidance.phase] = response[:2000]
+
+            print(f"\n[{guidance.phase.upper()}] Response preview:")
+            print(response[:500])
+
+        final = self.collect_results()
+        final["agent_responses"] = results
+
+        self.save_results()
+        return final
