@@ -127,6 +127,7 @@ save_report(scanner)
 | Flag hunting | `FlagHunter`, `hunt_flags()` |
 | NFS enumeration | `NFSEnumerator` — exports, parent/sibling mounts, SSH-key/secret + UID-spoof scan |
 | Mail enumeration | `MailEnumerator` — IMAP login/spray (concurrent), mailbox secret harvest |
+| Template/CVE discovery | `nuclei_scan` (open nuclei templates) + `correlate_cves` (version→CVE feed) |
 | Payload wordlists | `WordlistLoader` — bundled SecLists lists + offline fallbacks |
 
 ## Knowledge Base & Second Brain
@@ -187,6 +188,7 @@ bugbounty_ctf/
 ├── osint.py             # subdomains, dorks, Wayback, subdomain takeover
 ├── nfs_enum.py          # NFS exports, deeper/sibling mounts, sensitive-file + UID-spoof scan
 ├── mail_enum.py         # IMAP user-enum, concurrent spray, mailbox secret harvest
+├── template_scan.py     # nuclei-engine wrapper + version→CVE correlation
 ├── aws_exploit.py       # AWS credential abuse, SigV4 presigned URLs
 ├── ssrf_pivot.py        # SSRF-based internal network pivoting
 ├── smuggling.py         # HTTP request smuggling (raw socket)

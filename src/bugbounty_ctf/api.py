@@ -92,6 +92,14 @@ from bugbounty_ctf.session_recorder import SessionRecorder
 from bugbounty_ctf.skill_runner import PhaseGuidance, SkillOrchestrator
 from bugbounty_ctf.smuggling import SmugglingDetector
 from bugbounty_ctf.ssrf_pivot import SSRFPivot
+from bugbounty_ctf.template_scan import (
+    TemplateFinding,
+    correlate_cves,
+    load_cve_db,
+    nuclei_available,
+    nuclei_scan,
+    version_matches,
+)
 from bugbounty_ctf.websocket import WebSocketTester
 from bugbounty_ctf.wordlists import WordlistLoader
 
@@ -137,11 +145,13 @@ __all__ = [
     "SessionRecorder",
     "SkillOrchestrator",
     "SmugglingDetector",
+    "TemplateFinding",
     "TestResult",
     "WebSocketTester",
     "WordlistLoader",
     "bypass_url_filter",
     "confirm_vulnerability",
+    "correlate_cves",
     "create_agent",
     "decode_jwt",
     "derive_base_url",
@@ -165,7 +175,10 @@ __all__ = [
     "ip_to_decimal",
     "ip_to_hex",
     "ip_to_octal",
+    "load_cve_db",
     "map_surface",
+    "nuclei_available",
+    "nuclei_scan",
     "post_exploit_enum",
     "recommend_next_test",
     "save_report",
@@ -190,4 +203,5 @@ __all__ = [
     "test_xss",
     "test_xxe",
     "test_yaml_deserialization",
+    "version_matches",
 ]
