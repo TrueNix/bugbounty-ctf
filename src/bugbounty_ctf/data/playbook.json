@@ -1,0 +1,51 @@
+[
+  {
+    "id": "web",
+    "name": "Web application testing",
+    "trigger": {
+      "ports": [80, 443, 8080, 8000, 8443, 8888],
+      "tech": ["http", "nginx", "apache", "php", "werkzeug"]
+    },
+    "entrypoint": "bugbounty_ctf.api:SecurityScanner",
+    "parallel_safe": true,
+    "reference": "htb-recon-methodology.md",
+    "instruction": "Scan the web surface with SecurityScanner: map content with discover_content/map_surface, then test forms, params, and APIs for injection, IDOR, SSRF, and auth flaws."
+  },
+  {
+    "id": "nfs",
+    "name": "NFS enumeration",
+    "trigger": {
+      "ports": [2049, 111],
+      "tech": []
+    },
+    "entrypoint": "bugbounty_ctf.api:NFSEnumerator",
+    "parallel_safe": true,
+    "reference": "htb-recon-methodology.md",
+    "instruction": "Enumerate NFS with NFSEnumerator: list exports, propose candidate mounts, report uid_locked files to spoof; mount inside kalibox, never with host sudo."
+  },
+  {
+    "id": "mail",
+    "name": "Mail service enumeration",
+    "trigger": {
+      "ports": [25, 110, 143, 465, 587, 993, 995],
+      "tech": []
+    },
+    "entrypoint": "bugbounty_ctf.api:MailEnumerator",
+    "parallel_safe": true,
+    "reference": "htb-recon-methodology.md",
+    "instruction": "Enumerate mail services with MailEnumerator: probe SMTP/POP3/IMAP, enumerate users, read accessible mailboxes, and extract secrets from message bodies."
+  },
+  {
+    "id": "cve",
+    "name": "CVE correlation",
+    "trigger": {
+      "ports": [],
+      "tech": ["version-banner"]
+    },
+    "always": true,
+    "entrypoint": "bugbounty_ctf.api:correlate_cves",
+    "parallel_safe": true,
+    "reference": "htb-recon-methodology.md",
+    "instruction": "Correlate every service version banner against known CVEs with correlate_cves; for promising matches run nuclei_scan to confirm exploitability."
+  }
+]

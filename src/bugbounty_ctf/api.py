@@ -72,6 +72,14 @@ from bugbounty_ctf.oast import (
 from bugbounty_ctf.observations import Observation, ObservationStore, recommend_next_test
 from bugbounty_ctf.orchestrator import Orchestrator, OrchestratorReport, PhaseResult
 from bugbounty_ctf.osint import OSINTToolkit
+from bugbounty_ctf.playbook import (
+    Track,
+    load_tracks,
+    resolve_entrypoint,
+)
+from bugbounty_ctf.playbook import (
+    select as select_tracks,
+)
 from bugbounty_ctf.post_exploit import PostExploit, post_exploit_enum
 from bugbounty_ctf.pwn import PwnToolkit
 from bugbounty_ctf.quick_tests import (
@@ -154,6 +162,7 @@ __all__ = [
     "SmugglingDetector",
     "TemplateFinding",
     "TestResult",
+    "Track",
     "WebSocketTester",
     "WordlistLoader",
     "builtin_template_scan",
@@ -187,12 +196,15 @@ __all__ = [
     "ip_to_octal",
     "load_cve_db",
     "load_templates",
+    "load_tracks",
     "map_surface",
     "nuclei_available",
     "nuclei_scan",
     "post_exploit_enum",
     "recommend_next_test",
+    "resolve_entrypoint",
     "save_report",
+    "select_tracks",
     "test_blind_rce",
     "test_blind_ssrf",
     "test_blind_xxe",

@@ -102,6 +102,12 @@ host — is exactly what kalibox eliminates.
 
 ## Step 0.5: Triage the Surface — Web is Not the Only Track
 
+```python
+from bugbounty_ctf.api import select_tracks
+tracks = select_tracks(ports=open_ports, tech=tech_hints)   # executable form of the table below
+# fan out the parallel_safe tracks (see Delegate section); each track.instruction says what to run
+```
+
 **Before defaulting to web exploitation, look at what the host actually exposes.**
 Many boxes (HTB, pentest scopes) have *no exploitable web app* — the path is
 through infrastructure services (NFS, mail, SMB, RPC) or a versioned product
