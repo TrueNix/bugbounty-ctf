@@ -32,8 +32,14 @@ class _FakeKB:
 
 
 @pytest.fixture
-def runner() -> SkillOrchestrator:
-    scanner = SecurityScanner("http://target.test/", db=ScannerDB(":memory:"))
+def runner(tmp_path: Path) -> SkillOrchestrator:
+    # Isolate state_file per test — otherwise _save_state() writes to the shared
+    # default path (~/.hermes/state/<host>.json) and leaks findings across tests.
+    scanner = SecurityScanner(
+        "http://target.test/",
+        state_file=str(tmp_path / "state.json"),
+        db=ScannerDB(":memory:"),
+    )
     return SkillOrchestrator("http://target.test/", scanner=scanner, knowledge_base=_FakeKB())
 
 
@@ -340,6 +346,49 @@ class TestRunWithAgents:
         monkeypatch.setattr(skill_runner.subprocess, "run", fake_run)
         result = runner.run_with_agents()
         assert "agent_error" in result
+
+
+class TestFanOut:
+    """Independent tracks run as concurrent sub-agents; findings merge centrally."""
+
+    def test_parallel_tracks_merge_findings(
+        self, runner: SkillOrchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Each track returns a distinct finding via its <FINDINGS> block.
+        per_label = {
+            "nfs": '<FINDINGS>[{"type":"nfs-export","endpoint":"/srv/nfs","payload":""}]</FINDINGS>',
+            "mail": '<FINDINGS>[{"type":"weak-cred","endpoint":"imap","payload":"admin"}]</FINDINGS>',
+        }
+
+        def fake_run(prompt: str, *, timeout: int, label: str = "agent") -> str:
+            return per_label[label]
+
+        monkeypatch.setattr(runner, "_run_hermes", fake_run)
+        result = runner.fan_out([("nfs", "Enumerate NFS exports"), ("mail", "Spray IMAP creds")])
+        assert result["merged"] == 2
+        assert set(result["responses"]) == {"nfs", "mail"}
+        types = {f["type"] for f in runner.scanner.findings}
+        assert {"nfs-export", "weak-cred"} <= types
+
+    def test_empty_tasks_noop(self, runner: SkillOrchestrator) -> None:
+        assert runner.fan_out([]) == {"responses": {}, "merged": 0}
+
+    def test_task_prompt_has_bootstrap_and_contract(self, runner: SkillOrchestrator) -> None:
+        prompt = runner._build_task_prompt("nfs", "Enumerate NFS exports")
+        assert "nfs" in prompt
+        assert "Enumerate NFS exports" in prompt
+        assert "Bootstrap" in prompt
+        assert "<FINDINGS>" in prompt
+
+    def test_fan_out_fails_closed_without_binary(
+        self, runner: SkillOrchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_run(*args: Any, **kwargs: Any) -> Any:
+            raise FileNotFoundError("hermes")
+
+        monkeypatch.setattr(skill_runner.subprocess, "run", fake_run)
+        with pytest.raises(SkillOrchestrator.HermesNotFoundError):
+            runner.fan_out([("nfs", "Enumerate NFS exports")])
 
 
 class TestSaveResults:

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -684,6 +685,91 @@ class SkillOrchestrator:
 
         self.save_results()
         return final
+
+    def _build_task_prompt(self, label: str, instruction: str) -> str:
+        """Build a self-contained prompt for one independent fan-out task.
+
+        Unlike :meth:`_build_agent_prompt` (phase-shaped, tool-listed), this takes
+        a free-form ``instruction`` for one track (e.g. NFS enum, mail spray). It
+        still injects the shared scanner bootstrap so findings persist centrally,
+        and requires the same ``<FINDINGS>`` output contract.
+        """
+        lines = [f"You are a security testing sub-agent working the {label!r} track."]
+        if self.target_url:
+            lines.extend(
+                [
+                    "",
+                    "## Bootstrap (use this exact scanner — it shares state with the orchestrator)",
+                    "```python",
+                    "from bugbounty_ctf import SecurityScanner",
+                    "from bugbounty_ctf.engine import ScannerDB",
+                    "from bugbounty_ctf import api  # test_*, NFSEnumerator, MailEnumerator, …",
+                    "scanner = SecurityScanner(",
+                    f"    {self.target_url!r},",
+                    f"    state_file={self.scanner.state_file!r},",
+                    f"    db=ScannerDB({self.scanner.db.db_path!r}),",
+                    ")",
+                    "```",
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                "## Your task",
+                instruction,
+                "",
+                "## Required output",
+                f"End your reply with a <{self.FINDINGS_TAG}> … </{self.FINDINGS_TAG}> JSON array.",
+                "Each finding object: type, endpoint, method, payload, evidence,",
+                'confidence ("low"/"medium"/"high"), source. Emit an empty array if',
+                "nothing was found.",
+            ]
+        )
+        return "\n".join(lines)
+
+    def fan_out(
+        self,
+        tasks: list[tuple[str, str]],
+        *,
+        timeout: int = 180,
+        max_workers: int = 4,
+    ) -> dict[str, Any]:
+        """Run independent tracks as CONCURRENT ``hermes -z`` sub-agents.
+
+        ``tasks`` is a list of ``(label, instruction)`` pairs — each instruction
+        a self-contained directive for one independent track (NFS enum, mail
+        spray, web discovery, CVE correlation). The tracks run in parallel, each
+        in its own sub-agent context, so the driving agent's context stays clean
+        and wall-clock is the slowest single track rather than their sum.
+
+        Each sub-agent's ``<FINDINGS>`` block is parsed and merged centrally (in
+        this thread — no concurrent scanner mutation), so feed-forward is robust
+        even if a sub-agent never writes to the shared DB. Returns
+        ``{"responses": {label: text}, "merged": int}``. Fails closed: a missing
+        ``hermes`` binary raises :class:`HermesNotFoundError`.
+        """
+        prompts = [(label, self._build_task_prompt(label, instr)) for label, instr in tasks]
+        if not prompts:
+            return {"responses": {}, "merged": 0}
+
+        def run_one(item: tuple[str, str]) -> tuple[str, str]:
+            label, prompt = item
+            return label, self._run_hermes(prompt, timeout=timeout, label=label)
+
+        workers = max(1, min(max_workers, len(prompts)))
+        print(f"\n[fan-out] {len(prompts)} parallel track(s), {workers} worker(s)")
+        responses: dict[str, str] = {}
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for label, response in pool.map(run_one, prompts):
+                responses[label] = response
+
+        merged = 0
+        for response in responses.values():
+            merged += self._merge_agent_findings(self._parse_findings(response))
+        if merged:
+            print(f"[fan-out] Merged {merged} reported finding(s)")
+            self.scanner._save_state()
+        return {"responses": responses, "merged": merged}
 
     def _writeback_lessons(self, findings: list[dict[str, Any]]) -> int:
         """Record confirmed findings as searchable KB lessons. Returns count added."""
