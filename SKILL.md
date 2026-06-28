@@ -137,24 +137,19 @@ results. This is the single biggest fix for a run that stalls.
 ```python
 from bugbounty_ctf.nfs_enum import NFSEnumerator
 
-nfs = NFSEnumerator("10.10.10.10")
-exports = nfs.list_exports()                 # showmount -e
+nfs = NFSEnumerator("10.10.10.10")           # container execution by default
+exports = nfs.list_exports()                 # showmount -e (in kalibox)
 for path in nfs.candidate_mounts(exports):   # advertised + parents + common roots
     print("try:", path)                      # servers often serve parents they don't advertise
 
-# Mounting needs root — do it INSIDE kalibox, never with host sudo:
-from bugbounty_ctf.kalibox import KaliBox
-box = KaliBox().ensure()
-box.run(["mount", "-t", "nfs", "-o", "vers=3,nolock,ro",
-         f"{nfs.host}:/srv/nfs/onboarding", "/work/nfs"])
-report = NFSEnumerator.scan_dir(os.path.expanduser("~/.hermes/kalibox/work/nfs"))
-print(report["ssh_keys"], report["uid_locked"])  # SSH keys, secrets, AND uid_locked files
+report = nfs.mount_and_scan("/srv/nfs/onboarding")  # mount in kalibox + scan from host
+print(report["scan"]["ssh_keys"], report["scan"]["uid_locked"])
 ```
 
-**Don't burn time on the host mount.** `mount.nfs` requires root on the host —
-mount it inside kalibox instead (root in the container, not on your machine).
+**Privileged mounts run inside kalibox automatically** (`NFSEnumerator` uses
+`KaliEnv` by default); `scan_dir` reads the loot from the host bind-mount.
 The high-value output is
-`scan_dir(...)["uid_locked"]`: files you *can't* read, with the **owner UID to
+`report["scan"]["uid_locked"]`: files you *can't* read, with the **owner UID to
 spoof**. The classic NFS attack is AUTH_SYS UID-spoofing — create a local user
 with that UID (or run as it) and re-read. Don't stop at "permission denied."
 

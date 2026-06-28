@@ -6,30 +6,37 @@ was a dead end but the box really wanted a deeper path. This module:
 - lists exports (``showmount``),
 - proposes parent/sibling mount candidates many servers serve but don't
   advertise (e.g. ``/srv/nfs`` parent, ``/home``),
-- mounts read-only (needs root for the mount itself), and
+- mounts read-only inside the container by default (the mount syscall needs
+  root; ``KaliEnv`` provides it without touching host root), and
 - scans a mounted share for SSH keys, configs, and credentials — plus files
   it cannot read, reporting the owner UID to spoof (the classic NFS AUTH_SYS
   trick) so the operator can re-read as that UID.
 
+Privileged ops (``showmount``, ``mount``) run through an injected ``ExecEnv``
+that defaults to ``KaliEnv`` — the container is the default substrate, so the
+agent never needs to hand-route a mount through kalibox. ``scan_dir`` stays pure
+host-filesystem code reading the loot via the bind mount.
+
 Usage:
     from bugbounty_ctf.nfs_enum import NFSEnumerator
 
-    nfs = NFSEnumerator("10.10.10.10")
+    nfs = NFSEnumerator("10.10.10.10")        # container execution by default
     exports = nfs.list_exports()
     for path in nfs.candidate_mounts(exports):
         print("try:", path)
-    # after mounting a share read-only:
-    report = NFSEnumerator.scan_dir("/mnt/share")
-    print(report["ssh_keys"], report["uid_locked"])
+    # mount in the container + scan the loot from the host in one call:
+    report = nfs.mount_and_scan("/srv/nfs/onboarding")
+    print(report["scan"]["ssh_keys"], report["scan"]["uid_locked"])
 """
 
 from __future__ import annotations
 
 import os
 import re
-import subprocess
 from dataclasses import dataclass
 from typing import Any
+
+from bugbounty_ctf.execenv import ExecEnv, HostEnv, KaliEnv, default_exec_env
 
 # Names worth flagging when found on a share.
 _SSH_KEY_NAMES = ("id_rsa", "id_ed25519", "id_dsa", "id_ecdsa", "authorized_keys")
@@ -66,27 +73,30 @@ class NFSExport:
         return {"path": self.path, "clients": self.clients}
 
 
-def _run(cmd: list[str], timeout: int = 20) -> tuple[str, str, int]:
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return r.stdout, r.stderr, r.returncode
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return "", "", -1
-
-
 class NFSEnumerator:
     """Enumerate and analyse NFS exports for a host."""
 
-    def __init__(self, host: str) -> None:
+    def __init__(self, host: str, *, env: ExecEnv | None = None) -> None:
         if not _HOST_RE.match(host):
             raise ValueError(f"Invalid NFS host: {host!r}")
         self.host = host
+        # Privileged/raw ops default to the container (KaliEnv); pure host-fs
+        # analysis (scan_dir) never touches env.
+        self.env = env or default_exec_env()
+
+    def _exec(self, argv: list[str], *, timeout: float = 20) -> tuple[str, str, int]:
+        """Run an argv in the env, never raising (returns rc=-1 on failure)."""
+        try:
+            r = self.env.run(argv, timeout=timeout)
+            return r.stdout, r.stderr, r.returncode
+        except Exception:
+            return "", "", -1
 
     def list_exports(self) -> list[NFSExport]:
         """Return advertised exports via ``showmount -e`` (empty if none/blocked)."""
-        out, _, rc = _run(["showmount", "-e", "--no-headers", self.host])
+        out, _, rc = self._exec(["showmount", "-e", "--no-headers", self.host])
         if rc != 0 and not out:
-            out, _, _ = _run(["showmount", "-e", self.host])
+            out, _, _ = self._exec(["showmount", "-e", self.host])
         exports: list[NFSExport] = []
         for line in out.splitlines():
             line = line.strip()
@@ -131,12 +141,21 @@ class NFSEnumerator:
     ) -> dict[str, Any]:
         """Mount ``host:remote_path`` at ``mountpoint`` (read-only by default).
 
-        The mount syscall needs root; returns ``{"mounted", "error"}`` and never
-        raises, so callers can sweep candidates and report what needs privilege.
+        ``mountpoint`` is interpreted **in the env**. With the default
+        ``KaliEnv``, pass a container path under ``/work`` (e.g. ``/work/nfs``):
+        the mount runs as root inside the container, and the mounted loot is then
+        readable on the HOST at ``env.host_path(mountpoint)`` via the bind mount.
+        With ``HostEnv`` it is an ordinary host path (created here).
+
+        Returns ``{remote, mountpoint, mounted, error}`` and never raises, so
+        callers can sweep candidates and report what needs privilege.
         """
-        os.makedirs(mountpoint, exist_ok=True)
+        # Only create the directory for host-side mounts; container paths under
+        # /work live inside the container's namespace.
+        if isinstance(self.env, HostEnv):
+            os.makedirs(mountpoint, exist_ok=True)
         opts = f"vers={vers},nolock" + (",ro" if read_only else "")
-        _, err, rc = _run(
+        _, err, rc = self._exec(
             ["mount", "-t", "nfs", "-o", opts, f"{self.host}:{remote_path}", mountpoint],
             timeout=25,
         )
@@ -146,6 +165,26 @@ class NFSEnumerator:
             "mounted": rc == 0,
             "error": err.strip() if rc != 0 else "",
         }
+
+    def mount_and_scan(self, remote_path: str, *, name: str = "nfs") -> dict[str, Any]:
+        """Mount ``remote_path`` in the env and scan the loot from the host.
+
+        Mounts at the container path ``/work/{name}`` (via ``try_mount``), then
+        — if the mount succeeded — scans it. For a ``KaliEnv`` the share is read
+        from the HOST bind-mount (``env.host_path("/work/{name}")``); for a
+        ``HostEnv`` the mountpoint is read directly.
+
+        Returns ``{"mount": <try_mount result>, "scan": <scan_dir result|None>}``.
+        """
+        mountpoint = f"{KaliEnv.container_workdir}/{name}"
+        mount = self.try_mount(remote_path, mountpoint)
+        scan: dict[str, Any] | None = None
+        if mount["mounted"]:
+            if isinstance(self.env, KaliEnv):
+                scan = self.scan_dir(self.env.host_path(mountpoint))
+            else:
+                scan = self.scan_dir(mountpoint)
+        return {"mount": mount, "scan": scan}
 
     @staticmethod
     def scan_dir(path: str, *, max_files: int = 5000, read_bytes: int = 4096) -> dict[str, Any]:

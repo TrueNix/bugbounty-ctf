@@ -55,6 +55,7 @@ from bugbounty_ctf.engine import (
     ip_to_hex,
     ip_to_octal,
 )
+from bugbounty_ctf.execenv import ExecEnv, HostEnv, KaliEnv
 from bugbounty_ctf.failures import FailureType, RequestFailure, handle_failure
 from bugbounty_ctf.flag_hunter import FlagHunter, hunt_flags
 from bugbounty_ctf.forensics import ForensicsToolkit
@@ -125,14 +126,17 @@ __all__ = [
     "ChainContext",
     "CryptoToolkit",
     "DiffAnalysis",
+    "ExecEnv",
     "ExploitAgent",
     "FailureType",
     "FlagHunter",
     "ForensicsToolkit",
     "FuzzAgent",
+    "HostEnv",
     "Hypothesis",
     "HypothesisEngine",
     "KaliBox",
+    "KaliEnv",
     "KnowledgeBase",
     "MailEnumerator",
     "NFSEnumerator",
