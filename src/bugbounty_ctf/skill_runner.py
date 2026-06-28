@@ -24,11 +24,7 @@ from typing import Any
 
 from bugbounty_ctf.engine import SecurityScanner
 from bugbounty_ctf.knowledge import KnowledgeBase
-
-
-def _sanitize_for_prompt(value: object, maxlen: int = 120) -> str:
-    """Flatten target-derived data so it can't inject prompt structure."""
-    return str(value).replace("\r", " ").replace("\n", " ").replace("\x00", "")[:maxlen]
+from bugbounty_ctf.taint import render, render_json
 
 
 @dataclass
@@ -86,7 +82,11 @@ class SkillOrchestrator:
             return ""
         lines = []
         for r in results:
-            lines.append(f"{r['filename']} > {r['section']}: {r['snippet'][:120]}")
+            # KB lessons can embed target-derived payload/evidence (see
+            # _writeback_lessons), so render every leaf before it joins a line.
+            lines.append(
+                f"{render(r['filename'])} > {render(r['section'])}: {render(r['snippet'], maxlen=120)}"
+            )
         return "\n".join(lines)
 
     def _format_state(self) -> str:
@@ -99,7 +99,8 @@ class SkillOrchestrator:
         ]
         discovered = self._format_discovered()
         if discovered.get("tech_hints"):
-            lines.append(f"tech: {', '.join(discovered['tech_hints'])}")
+            # tech_hints are scraped from target responses — render each leaf.
+            lines.append(f"tech: {', '.join(render(t) for t in discovered['tech_hints'])}")
         if discovered.get("forms"):
             lines.append(f"forms: {len(discovered['forms'])}")
         if discovered.get("links"):
@@ -259,7 +260,8 @@ class SkillOrchestrator:
         else:
             methodology = self.kb.search("web vulnerability testing")
         rag_lines = [
-            f"{m['filename']} > {m['section']}: {m['snippet'][:120]}" for m in methodology[:10]
+            f"{render(m['filename'])} > {render(m['section'])}: {render(m['snippet'], maxlen=120)}"
+            for m in methodology[:10]
         ]
         return PhaseGuidance(
             phase="research",
@@ -447,8 +449,6 @@ class SkillOrchestrator:
     @staticmethod
     def _build_agent_prompt(guidance: PhaseGuidance) -> str:
         """Build a prompt for the Hermes sub-agent from phase guidance."""
-        import json as _json
-
         lines = [
             f"You are a security testing agent for the {guidance.phase} phase.",
         ]
@@ -478,7 +478,7 @@ class SkillOrchestrator:
             [
                 "",
                 "## Discovered so far",
-                _json.dumps(guidance.discovered, indent=2, default=str)[:1000],
+                render_json(guidance.discovered, maxlen=1000),
                 "",
                 "## Available tools",
             ]
@@ -497,9 +497,9 @@ class SkillOrchestrator:
             lines.extend(["", "## Prior memory (confirmed on this host in past runs)"])
             for m in guidance.prior_memory[:15]:
                 lines.append(
-                    f"  - {_sanitize_for_prompt(m.get('vuln_type', '?'))} @ "
-                    f"{_sanitize_for_prompt(m.get('endpoint', '?'))}"
-                    f" (payload: {_sanitize_for_prompt(m.get('payload', ''), 60)})"
+                    f"  - {render(m.get('vuln_type', '?'))} @ "
+                    f"{render(m.get('endpoint', '?'))}"
+                    f" (payload: {render(m.get('payload', ''), maxlen=60)})"
                 )
             lines.append("Re-check these first; they are known weak points.")
 
@@ -511,35 +511,30 @@ class SkillOrchestrator:
                 lines.append(
                     "  confirmed (re-check): "
                     + ", ".join(
-                        f"{_sanitize_for_prompt(h['vuln_type'])}@{_sanitize_for_prompt(h['param'])}"
-                        for h in confirmed[:8]
+                        f"{render(h['vuln_type'])}@{render(h['param'])}" for h in confirmed[:8]
                     )
                 )
             if rejected:
                 lines.append(
                     "  rejected (skip — already ruled out): "
                     + ", ".join(
-                        f"{_sanitize_for_prompt(h['vuln_type'])}@{_sanitize_for_prompt(h['param'])}"
-                        for h in rejected[:8]
+                        f"{render(h['vuln_type'])}@{render(h['param'])}" for h in rejected[:8]
                     )
                 )
 
         if guidance.prior_observations:
             lines.extend(["", "## Prior observations — suggested next tests"])
             for o in guidance.prior_observations[:8]:
-                hint = _sanitize_for_prompt(o.get("next_test", ""), 80)
+                hint = render(o.get("next_test", ""), maxlen=80)
                 lines.append(
-                    f"  - {_sanitize_for_prompt(o.get('vuln_type', '?'))} @ "
-                    f"{_sanitize_for_prompt(o.get('endpoint', '?'))}: {hint}"
+                    f"  - {render(o.get('vuln_type', '?'))} @ "
+                    f"{render(o.get('endpoint', '?'))}: {hint}"
                 )
 
         if guidance.previous_findings:
             lines.extend(["", "## Previous findings"])
             for f in guidance.previous_findings[:10]:
-                lines.append(
-                    f"  - {_sanitize_for_prompt(f.get('type', '?'))}: "
-                    f"{_sanitize_for_prompt(f.get('endpoint', '?'))}"
-                )
+                lines.append(f"  - {render(f.get('type', '?'))}: {render(f.get('endpoint', '?'))}")
 
         lines.extend(
             [
@@ -830,17 +825,15 @@ class SkillOrchestrator:
     @staticmethod
     def _build_verify_prompt(finding: dict[str, Any], target_url: str) -> str:
         """Prompt a skeptic sub-agent to REFUTE a single finding."""
-        import json as _json
-
         return "\n".join(
             [
                 "You are an adversarial verifier. Your job is to REFUTE the claim below,",
                 "not to confirm it. Re-test it independently against the target and decide",
                 "whether it actually reproduces. Default to refuted=true when uncertain.",
                 "",
-                f"Target: {target_url}",
+                f"Target: {render(target_url)}",
                 "## Claimed finding",
-                _json.dumps(finding, indent=2, default=str)[:800],
+                render_json(finding, maxlen=800),
                 "",
                 "## Required output",
                 f"End with a verdict block: <{SkillOrchestrator.VERDICT_TAG}>"
