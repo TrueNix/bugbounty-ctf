@@ -39,6 +39,9 @@ dev = [
     "mypy>=1.7",
 ]
 
+[project.scripts]
+kalibox = "bugbounty_ctf.kalibox:main"
+
 [project.urls]
 Homepage = "https://github.com/TrueNix/bugbounty-ctf"
 Repository = "https://github.com/TrueNix/bugbounty-ctf"

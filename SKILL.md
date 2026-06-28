@@ -60,6 +60,44 @@ print(result.get("found_flags")) # If flag is in strings!
 
 This runs `file`, `strings`, pattern matching for flags/base64/hex, and extension-based heuristics. Always start here — it catches the easy flags hiding in plaintext.
 
+## Step 0.4: Run Attacks Inside kalibox — Never Use Host `sudo`
+
+**All offensive and privileged commands run inside the `kalibox` container, not
+on the host.** The operator does not grant the agent root on their machine. Do
+**not** run `sudo`, `mount`, `docker --privileged`, or package installs on the
+host. `kalibox` is a persistent, isolated Kali container (`--privileged
+--network host`, so it already sees the VPN and reaches `10.129.x.x`) where
+privilege is sandboxed and disposable.
+
+```bash
+kalibox up                              # first run: pulls Kali + installs the toolset (once)
+kalibox nmap -sCV -p- 10.129.33.77      # run any offensive tool inside the box
+kalibox status                          # check container state
+kalibox shell                           # interactive Kali shell when you need one
+kalibox destroy                         # tear it down
+```
+
+Anything that needs root (NFS/SMB mounts, raw sockets, installing a tool) goes
+**through kalibox**, where it has root *in the container* without touching host
+privilege. A host work dir is bind-mounted at `/work`, so files written there
+are retrievable on the host without `docker cp`.
+
+From Python (e.g. to mount + scan NFS without host root):
+
+```python
+from bugbounty_ctf.kalibox import KaliBox
+
+box = KaliBox().ensure()
+box.run(["mount", "-t", "nfs", "-o", "vers=3,nolock,ro",
+         "10.129.33.77:/srv/nfs/onboarding", "/work/nfs"])   # root inside the container
+print(box.run("ls -laR /work/nfs").stdout)                   # loot is also on the host at ~/.hermes/kalibox/work/nfs
+```
+
+**Rule:** if a command would need `sudo` or special capabilities on the host,
+prefix it with `kalibox` instead. The earlier failure mode — burning minutes on
+`mount.nfs` not being setuid, then `sudo -n`, then `docker --privileged` on the
+host — is exactly what kalibox eliminates.
+
 ## Step 0.5: Triage the Surface — Web is Not the Only Track
 
 **Before defaulting to web exploitation, look at what the host actually exposes.**
@@ -96,14 +134,18 @@ exports = nfs.list_exports()                 # showmount -e
 for path in nfs.candidate_mounts(exports):   # advertised + parents + common roots
     print("try:", path)                      # servers often serve parents they don't advertise
 
-# Mounting needs root (this is a LOCAL constraint, not the target's):
-res = nfs.try_mount("/srv/nfs/onboarding", "/mnt/x")   # sudo, or run the process as root
-report = NFSEnumerator.scan_dir("/mnt/x")    # SSH keys, secrets, AND uid_locked files
-print(report["ssh_keys"], report["uid_locked"])
+# Mounting needs root — do it INSIDE kalibox, never with host sudo:
+from bugbounty_ctf.kalibox import KaliBox
+box = KaliBox().ensure()
+box.run(["mount", "-t", "nfs", "-o", "vers=3,nolock,ro",
+         f"{nfs.host}:/srv/nfs/onboarding", "/work/nfs"])
+report = NFSEnumerator.scan_dir(os.path.expanduser("~/.hermes/kalibox/work/nfs"))
+print(report["ssh_keys"], report["uid_locked"])  # SSH keys, secrets, AND uid_locked files
 ```
 
-**Don't burn time on the mount.** `mount.nfs` requires root — if you can't
-`sudo`, that's the blocker, not the export. The high-value output is
+**Don't burn time on the host mount.** `mount.nfs` requires root on the host —
+mount it inside kalibox instead (root in the container, not on your machine).
+The high-value output is
 `scan_dir(...)["uid_locked"]`: files you *can't* read, with the **owner UID to
 spoof**. The classic NFS attack is AUTH_SYS UID-spoofing — create a local user
 with that UID (or run as it) and re-read. Don't stop at "permission denied."
@@ -804,6 +846,7 @@ Many CTF labs are **vulnerability identification exercises**, not flag-capture:
 | `bugbounty_ctf/quick_tests.py` | Quick test wrappers: one-liners for SQLi, SSTI, CMDi, path traversal, NoSQLi, LDAP, SSRF |
 | `bugbounty_ctf/advanced_tests.py` | Advanced: WAF/defense detection, race conditions, XXE, deserialization, JWT, file upload, XSS, IDOR, GraphQL, chain exploitation, reporting |
 | `bugbounty_ctf/web_recon.py` | Automated web target recon (shell-injection-safe) |
+| `bugbounty_ctf/kalibox.py` | **Isolation:** run all offensive/privileged tooling inside a disposable Kali container (`kalibox` CLI + `KaliBox`) — no host `sudo`/root |
 | `bugbounty_ctf/nfs_enum.py` | **Infra:** NFS exports, parent/sibling mount candidates, sensitive-file + UID-locked scan (AUTH_SYS spoofing) |
 | `bugbounty_ctf/mail_enum.py` | **Infra:** IMAP/POP3 login check, concurrent credential spray, mailbox/attachment secret harvest |
 | `bugbounty_ctf/template_scan.py` | nuclei wrapper (auto-install), dependency-free builtin templates, version→CVE correlation (bundled DB + live NVD) |

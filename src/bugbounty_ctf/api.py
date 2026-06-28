@@ -59,6 +59,7 @@ from bugbounty_ctf.failures import FailureType, RequestFailure, handle_failure
 from bugbounty_ctf.flag_hunter import FlagHunter, hunt_flags
 from bugbounty_ctf.forensics import ForensicsToolkit
 from bugbounty_ctf.hypothesis import Hypothesis, HypothesisEngine
+from bugbounty_ctf.kalibox import KaliBox
 from bugbounty_ctf.knowledge import KnowledgeBase
 from bugbounty_ctf.mail_enum import MailEnumerator, extract_secrets
 from bugbounty_ctf.nfs_enum import NFSEnumerator, NFSExport
@@ -123,6 +124,7 @@ __all__ = [
     "FuzzAgent",
     "Hypothesis",
     "HypothesisEngine",
+    "KaliBox",
     "KnowledgeBase",
     "MailEnumerator",
     "NFSEnumerator",
