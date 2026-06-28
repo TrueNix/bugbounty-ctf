@@ -26,16 +26,6 @@ from bugbounty_ctf.advanced_tests import (
     test_xxe,
     test_yaml_deserialization,
 )
-from bugbounty_ctf.agents import (
-    AgentContext,
-    AgentResult,
-    BaseAgent,
-    ExploitAgent,
-    FuzzAgent,
-    ReconAgent,
-    ResearchAgent,
-    create_agent,
-)
 from bugbounty_ctf.aws_exploit import AWSExploiter, exploit_aws_credentials
 from bugbounty_ctf.crypto import CryptoToolkit
 from bugbounty_ctf.engine import (
@@ -71,7 +61,6 @@ from bugbounty_ctf.oast import (
     test_blind_xxe,
 )
 from bugbounty_ctf.observations import Observation, ObservationStore, recommend_next_test
-from bugbounty_ctf.orchestrator import Orchestrator, OrchestratorReport, PhaseResult
 from bugbounty_ctf.osint import OSINTToolkit
 from bugbounty_ctf.playbook import (
     Track,
@@ -120,18 +109,13 @@ from bugbounty_ctf.wordlists import WordlistLoader
 
 __all__ = [
     "AWSExploiter",
-    "AgentContext",
-    "AgentResult",
-    "BaseAgent",
     "ChainContext",
     "CryptoToolkit",
     "DiffAnalysis",
     "ExecEnv",
-    "ExploitAgent",
     "FailureType",
     "FlagHunter",
     "ForensicsToolkit",
-    "FuzzAgent",
     "HostEnv",
     "Hypothesis",
     "HypothesisEngine",
@@ -145,16 +129,11 @@ __all__ = [
     "OSINTToolkit",
     "Observation",
     "ObservationStore",
-    "Orchestrator",
-    "OrchestratorReport",
     "OutOfScopeError",
     "PhaseGuidance",
-    "PhaseResult",
     "PostExploit",
     "PwnToolkit",
-    "ReconAgent",
     "RequestFailure",
-    "ResearchAgent",
     "ResponseDiff",
     "ReverseToolkit",
     "SSRFPivot",
@@ -173,7 +152,6 @@ __all__ = [
     "bypass_url_filter",
     "confirm_vulnerability",
     "correlate_cves",
-    "create_agent",
     "decode_jwt",
     "default_cve_db",
     "derive_base_url",

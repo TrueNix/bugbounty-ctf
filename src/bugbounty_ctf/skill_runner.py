@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -700,6 +701,64 @@ class SkillOrchestrator:
 
         self.save_results()
         return final
+
+    def run(
+        self,
+        *,
+        mode: str = "auto",
+        ports: Iterable[int] | None = None,
+        tech: Iterable[str] | None = None,
+        timeout_per_phase: int = 120,
+        verify: bool = True,
+    ) -> dict[str, Any]:
+        """Autonomous entry point — dispatch to fan-out or the headless flow.
+
+        This is the single autonomous orchestration entry. It does NOT
+        reimplement any logic; it selects a strategy and delegates to the
+        existing :meth:`fan_out` and :meth:`run_with_agents` methods.
+
+        Modes:
+
+        - ``"auto"`` (default): if ``ports``/``tech`` are given, select playbook
+          tracks (:func:`bugbounty_ctf.playbook.select`) and fan out the
+          ``parallel_safe`` ones when there are at least two; otherwise fall back
+          to the headless per-phase flow. With no surface hints, always falls
+          back to the headless flow.
+        - ``"fanout"``: require ``ports``/``tech`` and always fan out the
+          ``parallel_safe`` selected tracks.
+        - ``"headless"``: always run the four-phase per-agent flow.
+
+        The interactive in-process path (``get_*_guidance()`` driven by the
+        running agent) is unaffected — that remains the agent-owned loop.
+        """
+        from bugbounty_ctf import playbook
+
+        def _parallel_tracks() -> list[playbook.Track]:
+            tracks = playbook.select(ports, tech)
+            return [t for t in tracks if t.parallel_safe]
+
+        if mode == "headless":
+            return self.run_with_agents(timeout_per_phase=timeout_per_phase, verify=verify)
+
+        if mode == "fanout":
+            if ports is None and tech is None:
+                raise ValueError("mode='fanout' requires ports and/or tech")
+            tracks = _parallel_tracks()
+            result = self.fan_out([(t.id, t.instruction) for t in tracks])
+            result["selected_tracks"] = [t.id for t in tracks]
+            return result
+
+        if mode == "auto":
+            if ports is None and tech is None:
+                return self.run_with_agents(timeout_per_phase=timeout_per_phase, verify=verify)
+            tracks = _parallel_tracks()
+            if len(tracks) >= 2:
+                result = self.fan_out([(t.id, t.instruction) for t in tracks])
+                result["selected_tracks"] = [t.id for t in tracks]
+                return result
+            return self.run_with_agents(timeout_per_phase=timeout_per_phase, verify=verify)
+
+        raise ValueError(f"unknown mode: {mode!r}")
 
     def _build_task_prompt(self, label: str, instruction: str) -> str:
         """Build a self-contained prompt for one independent fan-out task.

@@ -519,6 +519,116 @@ class TestFanOut:
         assert any(f["type"] == "nfs-export" for f in runner.scanner.findings)
 
 
+def _track(track_id: str, *, parallel_safe: bool = True) -> Any:
+    from bugbounty_ctf.playbook import Track
+
+    return Track(
+        id=track_id,
+        name=track_id,
+        ports=(),
+        tech=(),
+        entrypoint="bugbounty_ctf.api:test_ssrf",
+        parallel_safe=parallel_safe,
+        reference="",
+        instruction=f"instruction for {track_id}",
+        always=False,
+    )
+
+
+class TestRunDispatch:
+    """`run()` is a thin dispatcher over fan_out / run_with_agents."""
+
+    def test_headless_calls_run_with_agents(
+        self, runner: SkillOrchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: dict[str, Any] = {}
+
+        def fake_rwa(*, timeout_per_phase: int = 120, verify: bool = True) -> dict[str, Any]:
+            calls["rwa"] = {"timeout_per_phase": timeout_per_phase, "verify": verify}
+            return {"ok": True}
+
+        monkeypatch.setattr(runner, "run_with_agents", fake_rwa)
+        monkeypatch.setattr(runner, "fan_out", lambda *a, **k: pytest.fail("fan_out called"))
+
+        result = runner.run(mode="headless", timeout_per_phase=99, verify=False)
+        assert result == {"ok": True}
+        assert calls["rwa"] == {"timeout_per_phase": 99, "verify": False}
+
+    def test_auto_with_two_parallel_tracks_fans_out(
+        self, runner: SkillOrchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from bugbounty_ctf import playbook
+
+        monkeypatch.setattr(playbook, "select", lambda ports, tech: [_track("nfs"), _track("mail")])
+
+        captured: dict[str, Any] = {}
+
+        def fake_fan_out(tasks: list[tuple[str, str]], **kwargs: Any) -> dict[str, Any]:
+            captured["tasks"] = tasks
+            return {"responses": {}, "merged": 0}
+
+        monkeypatch.setattr(runner, "fan_out", fake_fan_out)
+        monkeypatch.setattr(
+            runner, "run_with_agents", lambda **k: pytest.fail("run_with_agents called")
+        )
+
+        result = runner.run(mode="auto", ports=[2049], tech=["nfs"])
+        assert captured["tasks"] == [
+            ("nfs", "instruction for nfs"),
+            ("mail", "instruction for mail"),
+        ]
+        assert result["selected_tracks"] == ["nfs", "mail"]
+
+    def test_auto_with_fewer_than_two_tracks_falls_back(
+        self, runner: SkillOrchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from bugbounty_ctf import playbook
+
+        monkeypatch.setattr(playbook, "select", lambda ports, tech: [_track("nfs")])
+        monkeypatch.setattr(runner, "fan_out", lambda *a, **k: pytest.fail("fan_out called"))
+
+        called: dict[str, bool] = {}
+
+        def fake_rwa(*, timeout_per_phase: int = 120, verify: bool = True) -> dict[str, Any]:
+            called["rwa"] = True
+            return {"fallback": True}
+
+        monkeypatch.setattr(runner, "run_with_agents", fake_rwa)
+        result = runner.run(mode="auto", ports=[2049], tech=["nfs"])
+        assert called["rwa"] is True
+        assert result == {"fallback": True}
+
+    def test_auto_without_hints_falls_back(
+        self, runner: SkillOrchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(runner, "fan_out", lambda *a, **k: pytest.fail("fan_out called"))
+        monkeypatch.setattr(runner, "run_with_agents", lambda **k: {"fallback": True})
+        assert runner.run(mode="auto") == {"fallback": True}
+
+    def test_auto_ignores_non_parallel_tracks(
+        self, runner: SkillOrchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from bugbounty_ctf import playbook
+
+        # Two selected, but only one is parallel_safe → fall back to headless.
+        monkeypatch.setattr(
+            playbook,
+            "select",
+            lambda ports, tech: [_track("nfs"), _track("seq", parallel_safe=False)],
+        )
+        monkeypatch.setattr(runner, "fan_out", lambda *a, **k: pytest.fail("fan_out called"))
+        monkeypatch.setattr(runner, "run_with_agents", lambda **k: {"fallback": True})
+        assert runner.run(mode="auto", ports=[1], tech=["x"]) == {"fallback": True}
+
+    def test_fanout_without_hints_raises(self, runner: SkillOrchestrator) -> None:
+        with pytest.raises(ValueError):
+            runner.run(mode="fanout")
+
+    def test_unknown_mode_raises(self, runner: SkillOrchestrator) -> None:
+        with pytest.raises(ValueError):
+            runner.run(mode="bogus")
+
+
 class TestSaveResults:
     def test_save_results_to_explicit_path(self, runner: SkillOrchestrator, tmp_path: Path) -> None:
         out = tmp_path / "sub" / "results.json"

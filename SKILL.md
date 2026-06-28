@@ -273,11 +273,10 @@ for s in suggestions:
 ### Multi-Agent Skill Orchestrator
 
 When running as a Hermes skill, use the SkillOrchestrator to guide testing
-through 4 phases. The Hermes agent (you) IS the reasoning engine — you execute
-phase guidance in-process. But you are **not limited to working alone**: when a
-target has independent tracks, delegate them to parallel sub-agents with
-`runner.fan_out(...)` (see "Delegate independent work" below) instead of running
-everything serially in your own context. The orchestrator provides phase
+through 4 phases. You own the loop. For independent tracks, fan them out by
+default (`SkillOrchestrator.run(mode='auto', ports=..., tech=...)` selects
+playbook tracks and fans out the parallel-safe ones); reason in-process only for
+dependent/sequential work like exploit chaining. The orchestrator provides phase
 guidance with RAG context and scanner state, and you execute the instructions
 using the toolkit functions:
 
@@ -377,17 +376,22 @@ How the sub-agent workflow stays coherent:
   `SkillOrchestrator.HermesNotFoundError` (caught by `run_with_agents`, which
   returns an `agent_error`) instead of silently recording empty phases.
 
-Use the in-process `get_*_guidance()` flow when an interactive Hermes agent is
-the reasoning engine; use `run_with_agents()` when nothing is driving and the
-orchestrator must spawn the reasoning agents itself.
+`SkillOrchestrator.run(...)` is the single autonomous entry that dispatches for
+you: `run(mode='auto', ports=..., tech=...)` selects playbook tracks and fans
+out the parallel-safe ones (falling back to the per-phase flow when there are
+fewer than two), `run(mode='fanout', ports=..., tech=...)` always fans out, and
+`run(mode='headless')` always runs the per-phase agent flow. Use the in-process
+`get_*_guidance()` flow when you are driving interactively and reasoning through
+dependent/sequential work yourself.
 
 #### Delegate independent work to PARALLEL sub-agents (do not do everything yourself)
 
-Even when **you** are the interactive reasoning engine, do not grind every
-service serially in your own context — that fills your context window and serial
-work (e.g. one mount/spray at a time) is what makes a run stall. When a target
-exposes **independent tracks** — NFS, mail, web discovery, CVE correlation —
-fan them out to concurrent sub-agents and merge their findings centrally:
+You own the loop, but do not grind every service serially in your own context —
+that fills your context window and serial work (e.g. one mount/spray at a time)
+is what makes a run stall. Fan-out is the default for independent work. When a
+target exposes **independent tracks** — NFS, mail, web discovery, CVE
+correlation — fan them out to concurrent sub-agents and merge their findings
+centrally:
 
 ```python
 from bugbounty_ctf.skill_runner import SkillOrchestrator
