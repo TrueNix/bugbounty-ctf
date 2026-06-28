@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from bugbounty_ctf.engine import ScannerDB, SecurityScanner
-from bugbounty_ctf.quick_tests import discover_content
+from bugbounty_ctf.quick_tests import DEFAULT_DISCOVERY_LIMIT, discover_content
 from bugbounty_ctf.quick_tests import test_cors as run_cors
 from bugbounty_ctf.quick_tests import test_open_redirect as run_open_redirect
 
@@ -99,6 +100,71 @@ class TestContentDiscovery:
         words = [f"w{i}" for i in range(40)]
         results = discover_content("http://target.test/", scanner=sc, wordlist=words)
         assert results == []
+
+    def test_default_caps_to_default_limit_and_logs(self, capsys: Any) -> None:
+        sc = _scanner()
+        probed: list[str] = []
+
+        def fake(method: str, url: str, **kwargs: Any) -> _Resp:
+            probed.append(url)
+            return _Resp(404)
+
+        sc._make_request = fake  # type: ignore[method-assign]
+        words = [f"w{i}" for i in range(DEFAULT_DISCOVERY_LIMIT + 500)]
+        discover_content("http://target.test/", scanner=sc, wordlist=words, workers=1)
+
+        assert len(probed) == DEFAULT_DISCOVERY_LIMIT
+        out = capsys.readouterr().out
+        assert f"capped to {DEFAULT_DISCOVERY_LIMIT}" in out
+        assert "limit=-1" in out
+
+    def test_negative_limit_probes_all(self) -> None:
+        sc = _scanner()
+        probed: list[str] = []
+
+        def fake(method: str, url: str, **kwargs: Any) -> _Resp:
+            probed.append(url)
+            return _Resp(404)
+
+        sc._make_request = fake  # type: ignore[method-assign]
+        words = [f"w{i}" for i in range(DEFAULT_DISCOVERY_LIMIT + 500)]
+        discover_content("http://target.test/", scanner=sc, wordlist=words, workers=1, limit=-1)
+        assert len(probed) == DEFAULT_DISCOVERY_LIMIT + 500
+
+    def test_positive_limit_probes_exactly_that_many(self) -> None:
+        sc = _scanner()
+        probed: list[str] = []
+
+        def fake(method: str, url: str, **kwargs: Any) -> _Resp:
+            probed.append(url)
+            return _Resp(404)
+
+        sc._make_request = fake  # type: ignore[method-assign]
+        words = [f"w{i}" for i in range(50)]
+        discover_content("http://target.test/", scanner=sc, wordlist=words, workers=1, limit=10)
+        assert len(probed) == 10
+
+    def test_wall_clock_budget_stops_early(self) -> None:
+        sc = _scanner()
+        probed: list[str] = []
+
+        def slow(method: str, url: str, **kwargs: Any) -> _Resp:
+            probed.append(url)
+            time.sleep(0.05)
+            return _Resp(404)
+
+        sc._make_request = slow  # type: ignore[method-assign]
+        words = [f"w{i}" for i in range(1000)]
+        discover_content(
+            "http://target.test/",
+            scanner=sc,
+            wordlist=words,
+            workers=1,
+            limit=-1,
+            max_seconds=0.1,
+        )
+        # Budget must stop the loop well before all 1000 paths are probed.
+        assert len(probed) < 1000
 
     def test_extensions_are_appended(self) -> None:
         sc = _scanner()

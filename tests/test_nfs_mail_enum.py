@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from collections.abc import Sequence
@@ -11,7 +12,6 @@ from typing import Any
 import pytest
 
 from bugbounty_ctf.execenv import KaliEnv
-from bugbounty_ctf.kalibox import KaliBox
 from bugbounty_ctf.mail_enum import MailEnumerator, extract_secrets
 from bugbounty_ctf.nfs_enum import NFSEnumerator, NFSExport
 
@@ -20,8 +20,7 @@ class FakeEnv:
     """A scripted ExecEnv stub — never touches real docker/host mount.
 
     ``run`` returns a CompletedProcess matched by a substring of the argv;
-    ``host_path`` echoes the container path through a ``host_root`` prefix so
-    tests can point scan_dir at a real tmp_path.
+    ``host_path`` echoes the container path through a ``host_root`` prefix.
     """
 
     def __init__(self, host_root: str = "/host") -> None:
@@ -50,6 +49,43 @@ class FakeEnv:
 
     def host_path(self, container_path: str) -> str:
         return self.host_root + container_path
+
+
+class FakeKaliEnv(KaliEnv):
+    """A KaliEnv whose ``run`` is scripted and whose workdir is a tmp dir.
+
+    Bypasses real docker entirely: matches argv substrings to canned
+    CompletedProcess replies so ``mount_and_scan`` can be exercised with no
+    container, and writes the host-side scanner copy into ``workdir`` (tmp_path).
+    """
+
+    def __init__(self, workdir: str) -> None:
+        self._workdir = workdir
+        self.calls: list[list[str]] = []
+        self._scripts: list[tuple[str, subprocess.CompletedProcess[str]]] = []
+
+    @property
+    def workdir(self) -> str:
+        return self._workdir
+
+    def reply(self, contains: str, *, stdout: str = "", stderr: str = "", rc: int = 0) -> None:
+        self._scripts.append(
+            (
+                contains,
+                subprocess.CompletedProcess(args=[], returncode=rc, stdout=stdout, stderr=stderr),
+            )
+        )
+
+    def run(
+        self, argv: Sequence[str], *, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        cmd = list(argv)
+        self.calls.append(cmd)
+        joined = " ".join(cmd)
+        for contains, resp in self._scripts:
+            if contains in joined:
+                return resp
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
 
 class TestNFSEnumerator:
@@ -96,37 +132,81 @@ class TestNFSEnumerator:
         assert result["mounted"] is False
         assert result["error"] == "access denied"
 
-    def test_mount_and_scan_happy_path_kali_env(self, tmp_path: Path) -> None:
-        # Real KaliEnv (fake docker runner): host_path("/work/nfs") → <workdir>/nfs.
-        loot = tmp_path / "nfs"
-        loot.mkdir()
-        (loot / "id_rsa").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nx\n")
-
-        def fake_runner(
-            cmd: Sequence[str], *, timeout: float | None = None, input: str | None = None
-        ) -> subprocess.CompletedProcess[str]:
-            # ps/images/run state checks succeed; mount returns 0.
-            return subprocess.CompletedProcess(args=list(cmd), returncode=0, stdout="", stderr="")
-
-        box = KaliBox(runner=fake_runner, workdir=str(tmp_path))
-        env = KaliEnv(box)
+    def test_mount_and_scan_runs_scanner_in_container(self, tmp_path: Path) -> None:
+        # KaliEnv path: mount succeeds; the in-container python3 _nfs_scan.py call
+        # returns a JSON report on stdout, which mount_and_scan parses and returns.
+        report_payload = {
+            "root": "/mnt/nfs_nfs",
+            "ssh_keys": [{"path": "/mnt/nfs_nfs/id_rsa", "uid": 1000}],
+            "secrets": [],
+            "uid_locked": [],
+            "interesting": [{"path": "/mnt/nfs_nfs/id_rsa", "uid": 1000}],
+        }
+        env = FakeKaliEnv(str(tmp_path))
+        env.reply("mount", rc=0)
+        env.reply("_nfs_scan.py", stdout=json.dumps(report_payload), rc=0)
         nfs = NFSEnumerator("10.0.0.1", env=env)
 
         report = nfs.mount_and_scan("/srv/nfs/onboarding")
 
         assert report["mount"]["mounted"] is True
-        assert report["scan"] is not None
-        assert report["scan"]["root"] == str(loot)
-        names = {os.path.basename(e["path"]) for e in report["scan"]["ssh_keys"]}
-        assert "id_rsa" in names
+        # Mounted at /mnt/nfs_* (NOT /work) so it does not land on the bind mount.
+        mount_call = next(
+            c for c in env.calls if "mount" in c and "_nfs_scan.py" not in " ".join(c)
+        )
+        assert "/mnt/nfs_nfs" in mount_call
+        # The scanner script was copied host-side into workdir (= tmp_path).
+        assert (tmp_path / "_nfs_scan.py").exists()
+        # Scanner was invoked in-container against the /mnt mountpoint.
+        scan_call = next(c for c in env.calls if "_nfs_scan.py" in " ".join(c))
+        assert scan_call == ["python3", "/work/_nfs_scan.py", "/mnt/nfs_nfs"]
+        assert report["scan"] == report_payload
 
-    def test_mount_and_scan_skips_scan_when_mount_fails(self) -> None:
-        env = FakeEnv()
+    def test_mount_and_scan_kali_scan_none_on_unparseable(self, tmp_path: Path) -> None:
+        env = FakeKaliEnv(str(tmp_path))
+        env.reply("mount", rc=0)
+        env.reply("_nfs_scan.py", stdout="not json", rc=0)
+        nfs = NFSEnumerator("10.0.0.1", env=env)
+        report = nfs.mount_and_scan("/srv/nfs/onboarding")
+        assert report["mount"]["mounted"] is True
+        assert report["scan"] is None
+
+    def test_mount_and_scan_kali_skips_scan_when_mount_fails(self, tmp_path: Path) -> None:
+        env = FakeKaliEnv(str(tmp_path))
         env.reply("mount", rc=32, stderr="denied")
         nfs = NFSEnumerator("10.0.0.1", env=env)
         report = nfs.mount_and_scan("/srv/nfs/onboarding")
         assert report["mount"]["mounted"] is False
         assert report["scan"] is None
+        # No scanner invocation when the mount failed.
+        assert not any("_nfs_scan.py" in " ".join(c) for c in env.calls)
+
+    def test_mount_and_scan_host_env_scans_directly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # HostEnv path: mount at the host path, scan it directly via scan_dir.
+        from bugbounty_ctf import execenv
+        from bugbounty_ctf.execenv import HostEnv
+
+        # Redirect the mountpoint base to a real tmp dir so scan_dir reads loot.
+        monkeypatch.setattr(KaliEnv, "container_workdir", str(tmp_path), raising=False)
+        monkeypatch.setattr(execenv, "CONTAINER_WORKDIR", str(tmp_path), raising=False)
+        loot = tmp_path / "share"
+        loot.mkdir()
+        (loot / "id_rsa").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nx\n")
+
+        class StubHostEnv(HostEnv):
+            def run(
+                self, argv: Sequence[str], *, timeout: float | None = None
+            ) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(args=list(argv), returncode=0, stdout="")
+
+        nfs = NFSEnumerator("10.0.0.1", env=StubHostEnv())
+        report = nfs.mount_and_scan("/srv/nfs/onboarding", name="share")
+        assert report["mount"]["mounted"] is True
+        assert report["scan"] is not None
+        names = {os.path.basename(e["path"]) for e in report["scan"]["ssh_keys"]}
+        assert "id_rsa" in names
 
     def test_scan_dir_flags_ssh_keys_and_secrets(self, tmp_path: Path) -> None:
         (tmp_path / "id_rsa").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nx\n")

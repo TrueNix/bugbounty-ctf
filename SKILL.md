@@ -152,12 +152,16 @@ exports = nfs.list_exports()                 # showmount -e (in kalibox)
 for path in nfs.candidate_mounts(exports):   # advertised + parents + common roots
     print("try:", path)                      # servers often serve parents they don't advertise
 
-report = nfs.mount_and_scan("/srv/nfs/onboarding")  # mount in kalibox + scan from host
+report = nfs.mount_and_scan("/srv/nfs/onboarding")  # mount + scan inside kalibox
 print(report["scan"]["ssh_keys"], report["scan"]["uid_locked"])
 ```
 
 **Privileged mounts run inside kalibox automatically** (`NFSEnumerator` uses
-`KaliEnv` by default); `scan_dir` reads the loot from the host bind-mount.
+`KaliEnv` by default). `mount_and_scan` now mounts at `/mnt/nfs_*` and scans
+**inside** the container — an NFS submount under the `rprivate` `/work` bind
+mount does not propagate to the host, so a host-side scan would see an empty
+dir. The scan now actually finds the files behind that bind mount; no behavior
+change for the caller and the same `{"mount": ..., "scan": ...}` return shape.
 The high-value output is
 `report["scan"]["uid_locked"]`: files you *can't* read, with the **owner UID to
 spoof**. The classic NFS attack is AUTH_SYS UID-spoofing — create a local user
@@ -249,7 +253,7 @@ found   = discover_content("http://10.129.34.19/", scanner=scanner)  # bundled w
 - `OASTServer()` + `test_blind_ssrf/_rce/_xxe(url, scanner=scanner, oast=oast)` — Out-of-band confirmation of blind SSRF / RCE / XXE via a per-token callback listener
 - `test_cors(url, scanner=scanner)` — Detect CORS misconfigurations (origin reflection, `null` trust, credentialed wildcard)
 - `test_open_redirect(url, scanner=scanner)` — Probe redirect params (next/url/redirect/…) with bypass payloads, confirm Location points off-site
-- `discover_content(base_url, scanner=scanner)` — Directory/content brute force using the bundled `dirbrute` wordlist (auto-filters catch-all routing responses)
+- `discover_content(base_url, scanner=scanner)` — Directory/content brute force using the bundled `dirbrute` wordlist (auto-filters catch-all routing responses). **Bounded by default** (~4000 paths / 90s wall-clock budget) so a bare call no longer times out on the 43k-entry list; pass `limit=-1` for a full sweep when a quick pass finds nothing.
 - `map_surface(base_url, scanner=scanner)` — Map attack surface (forms, links, tech)
 
 **Advanced functions:**

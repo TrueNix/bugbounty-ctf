@@ -14,8 +14,11 @@ was a dead end but the box really wanted a deeper path. This module:
 
 Privileged ops (``showmount``, ``mount``) run through an injected ``ExecEnv``
 that defaults to ``KaliEnv`` — the container is the default substrate, so the
-agent never needs to hand-route a mount through kalibox. ``scan_dir`` stays pure
-host-filesystem code reading the loot via the bind mount.
+agent never needs to hand-route a mount through kalibox. For ``KaliEnv`` the
+share is mounted and scanned *inside* the container (an NFS submount under the
+``rprivate`` ``/work`` bind mount does not propagate to the host, so the loot is
+only visible in-container); ``scan_dir`` stays pure host-filesystem code for the
+``HostEnv`` path and back-compat.
 
 Usage:
     from bugbounty_ctf.nfs_enum import NFSEnumerator
@@ -31,32 +34,15 @@ Usage:
 
 from __future__ import annotations
 
+import importlib.resources
+import json
 import os
 import re
 from dataclasses import dataclass
 from typing import Any
 
+from bugbounty_ctf import nfs_scan
 from bugbounty_ctf.execenv import ExecEnv, HostEnv, KaliEnv, default_exec_env
-
-# Names worth flagging when found on a share.
-_SSH_KEY_NAMES = ("id_rsa", "id_ed25519", "id_dsa", "id_ecdsa", "authorized_keys")
-_SECRET_NAMES = (
-    ".env",
-    "credentials",
-    "config.php",
-    "settings.py",
-    "wp-config.php",
-    ".htpasswd",
-    ".git-credentials",
-    "shadow",
-    "user.txt",
-    "root.txt",
-)
-_SECRET_SUFFIXES = (".pem", ".key", ".kdbx", ".bak", ".ovpn", ".ppk")
-_SECRET_CONTENT = re.compile(
-    r"PRIVATE KEY|BEGIN OPENSSH|ssh-(rsa|ed25519|dss)|password\s*[:=]|passwd\s*[:=]",
-    re.IGNORECASE,
-)
 
 # Common unadvertised export roots worth probing beyond what showmount returns.
 _COMMON_ROOTS = ("/home", "/srv/nfs", "/srv", "/var/nfs", "/exports", "/mnt", "/opt", "/data")
@@ -142,9 +128,11 @@ class NFSEnumerator:
         """Mount ``host:remote_path`` at ``mountpoint`` (read-only by default).
 
         ``mountpoint`` is interpreted **in the env**. With the default
-        ``KaliEnv``, pass a container path under ``/work`` (e.g. ``/work/nfs``):
-        the mount runs as root inside the container, and the mounted loot is then
-        readable on the HOST at ``env.host_path(mountpoint)`` via the bind mount.
+        ``KaliEnv``, pass a container path that is NOT under ``/work`` (e.g.
+        ``/mnt/nfs_nfs``): the mount runs as root inside the container and the
+        loot is visible *in the container* only — an NFS submount under the
+        ``rprivate`` ``/work`` bind mount would not propagate to the host, so
+        the share is scanned in-container instead of via ``host_path``.
         With ``HostEnv`` it is an ordinary host path (created here).
 
         Returns ``{remote, mountpoint, mounted, error}`` and never raises, so
@@ -167,75 +155,77 @@ class NFSEnumerator:
         }
 
     def mount_and_scan(self, remote_path: str, *, name: str = "nfs") -> dict[str, Any]:
-        """Mount ``remote_path`` in the env and scan the loot from the host.
+        """Mount ``remote_path`` in the env and scan the loot where it is visible.
 
-        Mounts at the container path ``/work/{name}`` (via ``try_mount``), then
-        — if the mount succeeded — scans it. For a ``KaliEnv`` the share is read
-        from the HOST bind-mount (``env.host_path("/work/{name}")``); for a
-        ``HostEnv`` the mountpoint is read directly.
+        For a ``KaliEnv`` the share is mounted at ``/mnt/nfs_{name}`` *inside*
+        the container (NOT under ``/work``, whose ``rprivate`` bind mount would
+        hide the submount from the host). The standalone scanner is copied into
+        the container via the ``/work`` bind mount and run there, and its JSON
+        report is parsed back. For a ``HostEnv`` the share is mounted at the
+        given host path and scanned directly via ``scan_dir``.
 
-        Returns ``{"mount": <try_mount result>, "scan": <scan_dir result|None>}``.
+        Returns ``{"mount": <try_mount result>, "scan": <report|None>}`` — scan
+        is ``None`` if the mount failed or the in-container scan output could not
+        be parsed. Never raises.
         """
+        if isinstance(self.env, KaliEnv):
+            return self._mount_and_scan_container(remote_path, name=name)
         mountpoint = f"{KaliEnv.container_workdir}/{name}"
+        mount = self.try_mount(remote_path, mountpoint)
+        scan = self.scan_dir(mountpoint) if mount["mounted"] else None
+        return {"mount": mount, "scan": scan}
+
+    def _mount_and_scan_container(self, remote_path: str, *, name: str) -> dict[str, Any]:
+        """KaliEnv path: mount in-container at ``/mnt/nfs_{name}`` and scan there."""
+        env = self.env
+        assert isinstance(env, KaliEnv)  # guarded by caller
+        mountpoint = f"/mnt/nfs_{name}"
         mount = self.try_mount(remote_path, mountpoint)
         scan: dict[str, Any] | None = None
         if mount["mounted"]:
-            if isinstance(self.env, KaliEnv):
-                scan = self.scan_dir(self.env.host_path(mountpoint))
-            else:
-                scan = self.scan_dir(mountpoint)
+            scan = self._run_container_scan(mountpoint)
         return {"mount": mount, "scan": scan}
+
+    def _run_container_scan(self, mountpoint: str) -> dict[str, Any] | None:
+        """Copy the standalone scanner into the container and run it there."""
+        env = self.env
+        assert isinstance(env, KaliEnv)
+        try:
+            source = importlib.resources.files(nfs_scan.__package__) / "nfs_scan.py"
+            script_bytes = source.read_bytes()
+        except (OSError, FileNotFoundError, TypeError):
+            try:
+                with open(nfs_scan.__file__, "rb") as fh:
+                    script_bytes = fh.read()
+            except OSError:
+                return None
+        # Write the scanner into the host workdir, which appears at /work
+        # inside the container via the bind mount.
+        host_script = os.path.join(env.workdir, "_nfs_scan.py")
+        try:
+            os.makedirs(env.workdir, exist_ok=True)
+            with open(host_script, "wb") as fh:
+                fh.write(script_bytes)
+        except OSError:
+            return None
+        container_script = f"{KaliEnv.container_workdir}/_nfs_scan.py"
+        out, _, rc = self._exec(["python3", container_script, mountpoint])
+        if rc != 0 or not out.strip():
+            return None
+        try:
+            parsed = json.loads(out)
+        except (ValueError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
     @staticmethod
     def scan_dir(path: str, *, max_files: int = 5000, read_bytes: int = 4096) -> dict[str, Any]:
         """Walk a mounted share for sensitive files and UID-locked content.
 
-        Returns ``ssh_keys`` / ``secrets`` (readable hits), ``uid_locked``
-        (files we can't read, with the owner UID to spoof), and ``interesting``
-        (all flagged paths). Pure filesystem analysis — no privilege needed.
+        Delegates to :func:`bugbounty_ctf.nfs_scan.scan`; kept as the public
+        static method for ``HostEnv`` / back-compat. Returns ``ssh_keys`` /
+        ``secrets`` (readable hits), ``uid_locked`` (files we can't read, with
+        the owner UID to spoof), and ``interesting`` (all flagged paths). Pure
+        filesystem analysis — no privilege needed.
         """
-        report: dict[str, Any] = {
-            "root": path,
-            "ssh_keys": [],
-            "secrets": [],
-            "uid_locked": [],
-            "interesting": [],
-        }
-        count = 0
-        for root, _dirs, files in os.walk(path):
-            for name in files:
-                count += 1
-                if count > max_files:
-                    return report
-                full = os.path.join(root, name)
-                flagged = (
-                    name in _SSH_KEY_NAMES
-                    or name in _SECRET_NAMES
-                    or name.endswith(_SECRET_SUFFIXES)
-                )
-                try:
-                    st = os.stat(full)
-                except OSError:
-                    continue
-                readable = os.access(full, os.R_OK)
-                entry = {"path": full, "uid": st.st_uid, "size": st.st_size, "readable": readable}
-
-                if not readable:
-                    report["uid_locked"].append(entry)  # spoof entry["uid"] to read
-                    continue
-
-                hit = flagged
-                if not hit and st.st_size <= read_bytes * 4:
-                    try:
-                        with open(full, encoding="utf-8", errors="ignore") as fh:
-                            if _SECRET_CONTENT.search(fh.read(read_bytes)):
-                                hit = True
-                    except OSError:
-                        pass
-                if hit:
-                    report["interesting"].append(entry)
-                    if name in _SSH_KEY_NAMES or name.endswith((".pem", ".key", ".ppk")):
-                        report["ssh_keys"].append(entry)
-                    else:
-                        report["secrets"].append(entry)
-        return report
+        return nfs_scan.scan(path, max_files=max_files, read_bytes=read_bytes)

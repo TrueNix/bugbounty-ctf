@@ -6,11 +6,17 @@ across tests, preserving state and findings. If omitted, a fresh scanner is crea
 
 from __future__ import annotations
 
+import time
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
 from bugbounty_ctf.engine import ResponseDiff, SecurityScanner, derive_base_url
 from bugbounty_ctf.wordlists import WordlistLoader
+
+# Default cap for a quick content-discovery pass. The bundled dirbrute wordlist
+# is ~43k entries; trying all of it always times out, so a bare call is capped
+# here (and the cap is logged). Pass ``limit=-1`` for a full sweep.
+DEFAULT_DISCOVERY_LIMIT = 4000
 
 
 def _get_scanner(url: str, scanner: SecurityScanner | None = None) -> SecurityScanner:
@@ -503,6 +509,7 @@ def discover_content(
     extensions: list[str] | None = None,
     limit: int = 0,
     workers: int = 16,
+    max_seconds: float = 90.0,
 ) -> list[dict[str, Any]]:
     """Brute-force content/paths against a target using a wordlist.
 
@@ -513,13 +520,23 @@ def discover_content(
     length), responses whose ``(status, length)`` pair matches a dominant
     baseline signature are filtered out.
 
+    The bundled ``dirbrute`` list is ~43k entries, so a bare call is bounded
+    twice over: candidates are capped (see ``limit``) and the probe loop honours
+    a wall-clock ``max_seconds`` budget. Both bounds are logged — there is no
+    silent truncation.
+
     Args:
         base_url: Target origin (path component is ignored).
         scanner: Optional shared scanner.
         wordlist: Explicit candidate list; defaults to the bundled dirbrute list.
         extensions: Optional extensions to append to each word (e.g. ['php','bak']).
-        limit: If > 0, cap the number of words tried (useful for quick passes).
+        limit: Candidate cap. ``0`` (default) caps to ``DEFAULT_DISCOVERY_LIMIT``
+            and logs the cap; ``< 0`` means unlimited (full wordlist); ``> 0``
+            caps to exactly that many words.
         workers: Concurrent request workers (set 1 to force a sequential scan).
+        max_seconds: Wall-clock budget for the probe loop. When it elapses the
+            scan returns what it found so far (logged). ``<= 0`` disables the
+            budget.
     """
     scanner = _get_scanner(base_url, scanner)
     origin = derive_base_url(base_url)
@@ -527,6 +544,12 @@ def discover_content(
     words = wordlist if wordlist is not None else WordlistLoader().load("dirbrute")
     if limit > 0:
         words = words[:limit]
+    elif limit == 0 and len(words) > DEFAULT_DISCOVERY_LIMIT:
+        print(
+            f"[*] capped to {DEFAULT_DISCOVERY_LIMIT} of {len(words)} candidates; "
+            f"pass limit=-1 for full sweep"
+        )
+        words = words[:DEFAULT_DISCOVERY_LIMIT]
 
     candidates: list[str] = []
     for w in words:
@@ -553,14 +576,38 @@ def discover_content(
             "_sig": (r.status_code, len(r.text)),
         }
 
+    deadline = time.monotonic() + max_seconds if max_seconds > 0 else None
     raw: list[dict[str, Any]] = []
+    probed = 0
     if workers <= 1:
-        raw = [item for path in candidates if (item := probe(path)) is not None]
+        for path in candidates:
+            if deadline is not None and time.monotonic() >= deadline:
+                print(
+                    f"[*] discovery stopped after {max_seconds}s "
+                    f"({probed}/{len(candidates)} probed)"
+                )
+                break
+            probed += 1
+            item = probe(path)
+            if item is not None:
+                raw.append(item)
     else:
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            raw = [item for item in pool.map(probe, candidates) if item is not None]
+            futures = {pool.submit(probe, path): path for path in candidates}
+            try:
+                remaining = (deadline - time.monotonic()) if deadline is not None else None
+                for fut in as_completed(futures, timeout=remaining):
+                    probed += 1
+                    item = fut.result()
+                    if item is not None:
+                        raw.append(item)
+            except TimeoutError:
+                print(
+                    f"[*] discovery stopped after {max_seconds}s "
+                    f"({probed}/{len(candidates)} probed)"
+                )
 
     signature_counts: dict[tuple[int, int], int] = {}
     for item in raw:
