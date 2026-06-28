@@ -27,12 +27,20 @@ class FakeRuntime:
             args=list(match), returncode=rc, stdout=stdout, stderr=""
         )
 
+    @staticmethod
+    def _contains_subseq(cmd: list[str], match: tuple[str, ...]) -> bool:
+        """True when ``match`` appears as a contiguous run inside ``cmd``."""
+        if not match:
+            return True
+        n = len(match)
+        return any(tuple(cmd[i : i + n]) == match for i in range(len(cmd) - n + 1))
+
     def __call__(
         self, cmd: list[str], *, timeout: float | None = None, input: str | None = None
     ) -> subprocess.CompletedProcess[str]:
         self.calls.append(cmd)
         for match, resp in self.responses.items():
-            if all(tok in cmd for tok in match):
+            if self._contains_subseq(cmd, match):
                 return resp
         return self.default
 
@@ -66,7 +74,7 @@ class TestValidation:
 
 class TestState:
     def test_is_running_true(self, box: KaliBox, fake: FakeRuntime) -> None:
-        fake.reply(("ps", "--format"), stdout="kalibox\n")
+        fake.reply(("ps", "--filter"), stdout="kalibox\n")
         assert box.is_running() is True
 
     def test_is_running_false_when_absent(self, box: KaliBox) -> None:
@@ -98,13 +106,13 @@ class TestStart:
         assert any("pull" in c for c in fake.calls)
 
     def test_start_noop_when_running(self, box: KaliBox, fake: FakeRuntime) -> None:
-        fake.reply(("ps", "--format"), stdout="kalibox\n")
+        fake.reply(("ps", "--filter"), stdout="kalibox\n")
         box.start()
         assert not any("run" in c for c in fake.calls)
 
     def test_start_restarts_existing_stopped(self, box: KaliBox, fake: FakeRuntime) -> None:
         # Exists (ps -a) but not running → `start`, never `run`.
-        fake.reply(("ps", "-a", "--format"), stdout="kalibox\n")
+        fake.reply(("ps", "-a"), stdout="kalibox\n")
         box.start()
         assert any(c[:2] == ["docker", "start"] for c in fake.calls)
         assert not any("run" in c for c in fake.calls)
@@ -112,18 +120,30 @@ class TestStart:
 
 class TestProvision:
     def test_provision_skips_when_marker_present(self, box: KaliBox, fake: FakeRuntime) -> None:
-        fake.reply(("exec", "test", "-f"), rc=0)  # marker exists
+        fake.reply(("ps", "--filter"), stdout="kalibox\n")  # container running
+        fake.reply(("test", "-f"), rc=0)  # marker exists
         assert box.provision() is False
         assert not any("apt-get" in " ".join(c) for c in fake.calls)
 
     def test_provision_installs_when_missing(self, box: KaliBox, fake: FakeRuntime) -> None:
-        fake.reply(("exec", "test", "-f"), rc=1)  # marker missing
+        fake.reply(("ps", "--filter"), stdout="kalibox\n")  # container running
+        fake.reply(("test", "-f"), rc=1)  # marker missing
         assert box.provision() is True
         install = next(c for c in fake.calls if "apt-get" in " ".join(c))
         joined = " ".join(install)
         assert "nmap" in joined and "nfs-common" in joined
         # Marker is written so subsequent provisions short-circuit.
         assert "touch" in joined and ".kalibox-provisioned" in joined
+
+    def test_provision_raises_when_not_running(self, box: KaliBox) -> None:
+        # FakeRuntime default → is_running() is False; provision must fail loudly.
+        with pytest.raises(RuntimeError):
+            box.provision()
+
+    def test_provision_rejects_bad_package_name(self, box: KaliBox, fake: FakeRuntime) -> None:
+        fake.reply(("ps", "--filter"), stdout="kalibox\n")  # container running
+        with pytest.raises(ValueError):
+            box.provision(["nmap; id"])
 
 
 class TestExecution:
@@ -187,9 +207,19 @@ class TestCli:
 
     def test_command_passthrough_returns_rc(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake = FakeRuntime()
-        fake.reply(("exec", "test", "-f"), rc=0)  # already provisioned
-        fake.reply(("exec", "kalibox", "bash"), stdout="ok\n", rc=0)
+        fake.reply(("ps", "--filter"), stdout="kalibox\n")  # container running
+        fake.reply(("test", "-f"), rc=0)  # already provisioned
         import bugbounty_ctf.kalibox as kb
 
         monkeypatch.setattr(kb, "_default_runner", fake)
         assert main(["nmap", "10.129.33.77"]) == 0
+        assert any("nmap" in c for c in fake.calls)
+
+    def test_up_returns_127_when_runtime_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def boom(*a: Any, **k: Any) -> Any:
+            raise FileNotFoundError("docker")
+
+        import bugbounty_ctf.kalibox as kb
+
+        monkeypatch.setattr(kb, "_default_runner", boom)
+        assert main(["up"]) == 127

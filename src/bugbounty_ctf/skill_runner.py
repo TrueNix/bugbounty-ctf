@@ -26,6 +26,11 @@ from bugbounty_ctf.engine import SecurityScanner
 from bugbounty_ctf.knowledge import KnowledgeBase
 
 
+def _sanitize_for_prompt(value: object, maxlen: int = 120) -> str:
+    """Flatten target-derived data so it can't inject prompt structure."""
+    return str(value).replace("\r", " ").replace("\n", " ").replace("\x00", "")[:maxlen]
+
+
 @dataclass
 class PhaseGuidance:
     """Context provided to the Hermes agent at each phase."""
@@ -492,8 +497,9 @@ class SkillOrchestrator:
             lines.extend(["", "## Prior memory (confirmed on this host in past runs)"])
             for m in guidance.prior_memory[:15]:
                 lines.append(
-                    f"  - {m.get('vuln_type', '?')} @ {m.get('endpoint', '?')}"
-                    f" (payload: {str(m.get('payload', ''))[:60]})"
+                    f"  - {_sanitize_for_prompt(m.get('vuln_type', '?'))} @ "
+                    f"{_sanitize_for_prompt(m.get('endpoint', '?'))}"
+                    f" (payload: {_sanitize_for_prompt(m.get('payload', ''), 60)})"
                 )
             lines.append("Re-check these first; they are known weak points.")
 
@@ -504,24 +510,36 @@ class SkillOrchestrator:
             if confirmed:
                 lines.append(
                     "  confirmed (re-check): "
-                    + ", ".join(f"{h['vuln_type']}@{h['param']}" for h in confirmed[:8])
+                    + ", ".join(
+                        f"{_sanitize_for_prompt(h['vuln_type'])}@{_sanitize_for_prompt(h['param'])}"
+                        for h in confirmed[:8]
+                    )
                 )
             if rejected:
                 lines.append(
                     "  rejected (skip — already ruled out): "
-                    + ", ".join(f"{h['vuln_type']}@{h['param']}" for h in rejected[:8])
+                    + ", ".join(
+                        f"{_sanitize_for_prompt(h['vuln_type'])}@{_sanitize_for_prompt(h['param'])}"
+                        for h in rejected[:8]
+                    )
                 )
 
         if guidance.prior_observations:
             lines.extend(["", "## Prior observations — suggested next tests"])
             for o in guidance.prior_observations[:8]:
-                hint = str(o.get("next_test", ""))[:80]
-                lines.append(f"  - {o.get('vuln_type', '?')} @ {o.get('endpoint', '?')}: {hint}")
+                hint = _sanitize_for_prompt(o.get("next_test", ""), 80)
+                lines.append(
+                    f"  - {_sanitize_for_prompt(o.get('vuln_type', '?'))} @ "
+                    f"{_sanitize_for_prompt(o.get('endpoint', '?'))}: {hint}"
+                )
 
         if guidance.previous_findings:
             lines.extend(["", "## Previous findings"])
             for f in guidance.previous_findings[:10]:
-                lines.append(f"  - {f.get('type', '?')}: {f.get('endpoint', '?')}")
+                lines.append(
+                    f"  - {_sanitize_for_prompt(f.get('type', '?'))}: "
+                    f"{_sanitize_for_prompt(f.get('endpoint', '?'))}"
+                )
 
         lines.extend(
             [
@@ -754,7 +772,14 @@ class SkillOrchestrator:
 
         def run_one(item: tuple[str, str]) -> tuple[str, str]:
             label, prompt = item
-            return label, self._run_hermes(prompt, timeout=timeout, label=label)
+            try:
+                return label, self._run_hermes(prompt, timeout=timeout, label=label)
+            except self.HermesNotFoundError:
+                # Affects every track (binary missing) — fail closed, re-raise.
+                raise
+            except Exception as e:
+                # Isolate a single track's failure so the others still return.
+                return label, f"[TRACK ERROR] {type(e).__name__}: {e}"
 
         workers = max(1, min(max_workers, len(prompts)))
         print(f"\n[fan-out] {len(prompts)} parallel track(s), {workers} worker(s)")
@@ -763,6 +788,10 @@ class SkillOrchestrator:
             for label, response in pool.map(run_one, prompts):
                 responses[label] = response
 
+        # Order matters: all workers have exited, so reload any state a sub-agent
+        # persisted directly BEFORE merging declared <FINDINGS> on top — otherwise
+        # _save_state() would clobber what the sub-agents wrote.
+        self._reload_state()
         merged = 0
         for response in responses.values():
             merged += self._merge_agent_findings(self._parse_findings(response))

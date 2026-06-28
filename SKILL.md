@@ -63,11 +63,13 @@ This runs `file`, `strings`, pattern matching for flags/base64/hex, and extensio
 ## Step 0.4: Run Attacks Inside kalibox — Never Use Host `sudo`
 
 **All offensive and privileged commands run inside the `kalibox` container, not
-on the host.** The operator does not grant the agent root on their machine. Do
-**not** run `sudo`, `mount`, `docker --privileged`, or package installs on the
-host. `kalibox` is a persistent, isolated Kali container (`--privileged
---network host`, so it already sees the VPN and reaches `10.129.x.x`) where
-privilege is sandboxed and disposable.
+on the host.** This keeps the agent from scattering `sudo` calls across the
+machine. Do **not** run `sudo`, `mount`, `docker --privileged`, or package
+installs on the host. `kalibox` is a persistent Kali container (`--privileged
+--network host`, so it already sees the VPN and reaches `10.129.x.x`) that is
+disposable — you can destroy it at any time. Note this is an operational
+convenience, **not** a security sandbox: docker-group access and `--privileged`
+are equivalent to host root.
 
 ```bash
 kalibox up                              # first run: pulls Kali + installs the toolset (once)
@@ -78,9 +80,9 @@ kalibox destroy                         # tear it down
 ```
 
 Anything that needs root (NFS/SMB mounts, raw sockets, installing a tool) goes
-**through kalibox**, where it has root *in the container* without touching host
-privilege. A host work dir is bind-mounted at `/work`, so files written there
-are retrievable on the host without `docker cp`.
+**through kalibox**, where it runs as root *in the container* and keeps those
+operations off the host's `sudo`. A host work dir is bind-mounted at `/work`, so
+files written there are retrievable on the host without `docker cp`.
 
 From Python (e.g. to mount + scan NFS without host root):
 

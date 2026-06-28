@@ -1,15 +1,19 @@
-"""kalibox — run offensive tooling inside an isolated Kali container.
+"""kalibox — run offensive tooling inside a disposable Kali container.
 
-Keeps root and privilege **off the host**. A persistent, privileged Kali
-container with host networking (so it sees your VPN and reaches engagement
-targets like ``10.129.x.x``) executes the offensive tooling — ``nmap``, NFS
-mounts, ``smbclient``, sprays, etc. — via ``docker exec``. The host never runs
-``sudo`` and never grants the agent root; all privilege lives inside a
-disposable container you can destroy at any time.
+Routes privileged operations into a disposable container so the agent never
+calls ``sudo`` on the host. A persistent, privileged Kali container with host
+networking (so it sees your VPN and reaches engagement targets like
+``10.129.x.x``) executes the offensive tooling — ``nmap``, NFS mounts,
+``smbclient``, sprays, etc. — via ``docker exec``.
+
+This is an operational convenience and a disposable namespace — **NOT** a
+security sandbox: docker-group access and ``--privileged`` are equivalent to
+host root.
 
 Why this exists: agents reach for host ``sudo`` / ``docker --privileged`` to do
-things like mount NFS, which means handing them root on your machine. Routing
-everything through ``kalibox`` removes that need entirely.
+things like mount NFS. Routing everything through ``kalibox`` keeps those
+operations in one disposable container you can destroy at any time, instead of
+scattering ``sudo`` calls across the host.
 
 Usage (Python):
     from bugbounty_ctf.kalibox import KaliBox
@@ -64,6 +68,7 @@ DEFAULT_TOOLS: tuple[str, ...] = (
 )
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_PKG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]*$")
 _PROVISION_MARKER = "/var/lib/.kalibox-provisioned"
 
 # Runner signature mirrors a thin subprocess.run wrapper so it can be injected
@@ -176,6 +181,11 @@ class KaliBox:
         Idempotent: a marker file inside the container short-circuits subsequent
         calls, so re-running ``ensure()`` is cheap.
         """
+        if not self.is_running():
+            raise RuntimeError("kalibox container is not running — call start()/ensure() first")
+        for t in tools:
+            if not _PKG_RE.match(t):
+                raise ValueError(f"Invalid package name: {t!r}")
         if self.exec_raw(["test", "-f", _PROVISION_MARKER]).returncode == 0:
             return False
         script = (
@@ -284,7 +294,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if sub == "shell":
             box.start()
-            os.execvp(box.runtime, [box.runtime, "exec", "-it", box.name, "bash"])
+            try:
+                os.execvp(box.runtime, [box.runtime, "exec", "-it", box.name, "bash"])
+            except OSError as e:
+                sys.stderr.write(f"[kalibox] exec failed: {e}\n")
+                return 1
 
         # Default: run the whole argv as a command inside the container.
         box.ensure(provision=True)
