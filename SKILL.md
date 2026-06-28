@@ -419,6 +419,16 @@ target exposes **independent tracks** — NFS, mail, web discovery, CVE
 correlation — fan them out to concurrent sub-agents and merge their findings
 centrally:
 
+**Use `SkillOrchestrator.fan_out(...)` — NOT the harness `delegate_task` tool.**
+`fan_out` is **synchronous**: it blocks, runs all tracks concurrently, merges
+their findings, and **returns in the same turn** so you immediately continue to
+analysis and exploitation. The harness's background `delegate_task` dispatches
+fire-and-forget tasks and leaves your loop idle ("I'll resume when they
+finish") — the run **stalls and does not continue**. Do not use it for recon
+tracks. After `fan_out()` returns, you MUST act on `result` in the same turn:
+inspect the merged findings and proceed to the exploit phase — fanning out is one
+step of the loop, not the end of it.
+
 ```python
 from bugbounty_ctf.skill_runner import SkillOrchestrator
 
