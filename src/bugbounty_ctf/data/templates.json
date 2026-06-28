@@ -1,0 +1,14 @@
+[
+  {"id": "exposed-git-config", "name": "Exposed .git/config", "severity": "medium", "path": "/.git/config", "tags": ["exposure", "git"], "match": {"words": ["[core]", "repositoryformatversion"]}},
+  {"id": "exposed-git-head", "name": "Exposed .git/HEAD", "severity": "medium", "path": "/.git/HEAD", "tags": ["exposure", "git"], "match": {"words": ["ref: refs/"]}},
+  {"id": "exposed-dotenv", "name": "Exposed .env file", "severity": "high", "path": "/.env", "tags": ["exposure", "config"], "match": {"regex": "(?m)^[A-Z0-9_]+=", "words_any": ["DB_", "SECRET", "API", "PASSWORD", "TOKEN"]}},
+  {"id": "spring-actuator-env", "name": "Spring Boot Actuator env exposed", "severity": "high", "path": "/actuator/env", "tags": ["exposure", "spring"], "match": {"words": ["propertySources"]}},
+  {"id": "phpinfo", "name": "phpinfo() exposed", "severity": "medium", "path": "/phpinfo.php", "tags": ["exposure", "php"], "match": {"words": ["PHP Version"]}},
+  {"id": "apache-server-status", "name": "Apache server-status exposed", "severity": "low", "path": "/server-status", "tags": ["exposure", "apache"], "match": {"words": ["Apache Server Status"]}},
+  {"id": "ds-store", "name": ".DS_Store exposed", "severity": "low", "path": "/.DS_Store", "tags": ["exposure"], "match": {"words": ["Bud1"]}},
+  {"id": "svn-wc-db", "name": "Subversion wc.db exposed", "severity": "low", "path": "/.svn/wc.db", "tags": ["exposure", "svn"], "match": {"words": ["SQLite format"]}},
+  {"id": "swagger-json", "name": "Swagger/OpenAPI spec exposed", "severity": "info", "path": "/swagger.json", "tags": ["exposure", "api"], "match": {"words_any": ["swagger", "openapi"]}},
+  {"id": "config-php-bak", "name": "PHP config backup exposed", "severity": "medium", "path": "/config.php.bak", "tags": ["exposure", "backup"], "match": {"words": ["<?php"]}},
+  {"id": "wp-login", "name": "WordPress login present", "severity": "info", "path": "/wp-login.php", "tags": ["tech", "wordpress"], "match": {"words_any": ["WordPress", "user_login"]}},
+  {"id": "env-laravel-debug", "name": "Laravel debug / Ignition exposed", "severity": "high", "path": "/_ignition/health-check", "tags": ["exposure", "laravel"], "match": {"words_any": ["can_execute_commands", "Ignition"]}}
+]

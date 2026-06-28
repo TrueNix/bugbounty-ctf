@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from pathlib import Path
+from typing import Any, ClassVar
 
 import pytest
 
@@ -45,7 +46,9 @@ class TestCorrelateCves:
 
 class TestNucleiWrapper:
     def test_graceful_when_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(template_scan, "nuclei_available", lambda: False)
+        # ensure_nuclei returns None (offline / not installable) → graceful no-op,
+        # never a real download during tests.
+        monkeypatch.setattr(template_scan, "ensure_nuclei", lambda **k: None)
         assert nuclei_scan("http://t/") == []
 
     def test_parses_jsonl_and_records(self) -> None:
@@ -68,7 +71,7 @@ class TestNucleiWrapper:
         assert any(f["source"] == "nuclei:CVE-2021-1234" for f in sc.findings)
 
     def test_scan_runs_when_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(template_scan, "nuclei_available", lambda: True)
+        monkeypatch.setattr(template_scan, "ensure_nuclei", lambda **k: "/usr/bin/nuclei")
 
         def fake_run(*a: Any, **k: Any) -> Any:
             import subprocess
@@ -83,5 +86,147 @@ class TestNucleiWrapper:
             )
 
         monkeypatch.setattr(template_scan.subprocess, "run", fake_run)
-        findings = nuclei_scan("http://t/")
+        findings = nuclei_scan("http://t/", update_templates=False)
         assert findings and findings[0].template_id == "tech-detect"
+
+    def test_ensure_nuclei_downloads(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import io
+        import zipfile
+
+        monkeypatch.setattr(template_scan, "_BIN_DIR", str(tmp_path))
+        monkeypatch.setattr(template_scan.shutil, "which", lambda _: None)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("nuclei", b"#!/bin/sh\necho fake\n")
+        zip_bytes = buf.getvalue()
+
+        class _R:
+            def __init__(self, *, j: Any = None, c: bytes = b"") -> None:
+                self._j, self.content = j, c
+
+            def json(self) -> Any:
+                return self._j
+
+        def fetcher(url: str, **k: Any) -> Any:
+            if url.endswith("releases/latest"):
+                return _R(
+                    j={
+                        "assets": [
+                            {
+                                "name": "nuclei_3.0_linux_amd64.zip",
+                                "browser_download_url": "http://x/nuclei.zip",
+                            }
+                        ]
+                    }
+                )
+            return _R(c=zip_bytes)
+
+        monkeypatch.setattr("platform.system", lambda: "Linux")
+        monkeypatch.setattr("platform.machine", lambda: "x86_64")
+        path = template_scan.ensure_nuclei(fetcher=fetcher)
+        assert path == str(tmp_path / "nuclei")
+        assert (tmp_path / "nuclei").exists()
+
+
+class _Resp2:
+    def __init__(self, status: int = 200, text: str = "") -> None:
+        self.status_code = status
+        self.text = text
+
+
+class TestBundledData:
+    def test_default_cve_db_loads_bundle(self) -> None:
+        from bugbounty_ctf.template_scan import default_cve_db
+
+        db = default_cve_db()
+        assert "roundcube" in db and not any(k.startswith("_") for k in db)
+        assert len(db) >= 10  # self-contained seed
+
+    def test_load_templates_bundle(self) -> None:
+        from bugbounty_ctf.template_scan import load_templates
+
+        tpls = load_templates()
+        ids = {t["id"] for t in tpls}
+        assert "exposed-git-config" in ids
+
+
+class TestBuiltinTemplateScan:
+    def test_matches_git_config(self) -> None:
+        from bugbounty_ctf.template_scan import builtin_template_scan
+
+        sc = SecurityScanner("http://t.test/", db=ScannerDB(":memory:"))
+
+        def fake(method: str, url: str, **kw: Any) -> _Resp2:
+            if url.endswith("/.git/config"):
+                return _Resp2(200, "[core]\nrepositoryformatversion = 0\n")
+            return _Resp2(404, "nope")
+
+        sc._make_request = fake  # type: ignore[method-assign]
+        hits = builtin_template_scan("http://t.test/", scanner=sc, workers=4)
+        assert any(h.template_id == "exposed-git-config" for h in hits)
+        assert any(f["type"] == "template:exposed-git-config" for f in sc.findings)
+
+    def test_no_match_on_catch_all(self) -> None:
+        from bugbounty_ctf.template_scan import builtin_template_scan
+
+        sc = SecurityScanner("http://t.test/", db=ScannerDB(":memory:"))
+        sc._make_request = lambda *a, **k: _Resp2(200, "generic homepage")  # type: ignore[method-assign]
+        assert builtin_template_scan("http://t.test/", scanner=sc, workers=4) == []
+
+
+class TestNvdOnlineFeed:
+    _NVD: ClassVar[dict[str, Any]] = {
+        "vulnerabilities": [
+            {
+                "cve": {
+                    "id": "CVE-2099-0009",
+                    "descriptions": [{"lang": "en", "value": "Example remote bug"}],
+                    "metrics": {"cvssMetricV31": [{"cvssData": {"baseSeverity": "HIGH"}}]},
+                    "configurations": [{"nodes": [{"cpeMatch": [{"versionEndExcluding": "2.0"}]}]}],
+                }
+            }
+        ]
+    }
+
+    def test_parse_nvd(self) -> None:
+        from bugbounty_ctf.template_scan import _parse_nvd
+
+        entries = _parse_nvd(self._NVD)
+        assert entries == [
+            {
+                "cve": "CVE-2099-0009",
+                "affected": "<2.0",
+                "severity": "high",
+                "name": "Example remote bug",
+            }
+        ]
+
+    def test_update_cve_db_fetches_and_caches(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from bugbounty_ctf import template_scan
+
+        monkeypatch.setattr(template_scan, "_CACHE_DIR", str(tmp_path))
+        nvd = self._NVD
+
+        def fetcher(url: str, **kw: Any) -> Any:
+            return type("R", (), {"json": lambda self: nvd})()
+
+        entries = template_scan.update_cve_db("acme", refresh=True, fetcher=fetcher)
+        assert entries[0]["cve"] == "CVE-2099-0009"
+        assert (tmp_path / "acme.json").exists()  # cached for subsequent runs
+
+    def test_correlate_online_merges(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from bugbounty_ctf import template_scan
+
+        monkeypatch.setattr(
+            template_scan,
+            "update_cve_db",
+            lambda product, **k: (
+                [{"cve": "CVE-2099-1", "affected": "<2.0", "severity": "high"}]
+                if product == "acme"
+                else []
+            ),
+        )
+        matches = template_scan.correlate_cves([{"product": "acme", "version": "1.0"}], online=True)
+        assert any(m["cve"] == "CVE-2099-1" for m in matches)

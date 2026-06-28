@@ -49,10 +49,11 @@ packages = ["src/bugbounty_ctf"]
 # Ship the bundled SecLists payload wordlists as package data so they survive
 # `pip install` and the Hermes skill copy (WordlistLoader resolves them relative
 # to the package directory).
-artifacts = ["src/bugbounty_ctf/wordlists/*.txt"]
+artifacts = ["src/bugbounty_ctf/wordlists/*.txt", "src/bugbounty_ctf/data/*.json"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/bugbounty_ctf/wordlists" = "bugbounty_ctf/wordlists"
+"src/bugbounty_ctf/data" = "bugbounty_ctf/data"
 
 [tool.hatch.build.targets.sdist]
 include = ["src", "tests", "references", "templates", "SKILL.md", "README.md"]

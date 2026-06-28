@@ -1,0 +1,41 @@
+{
+  "_comment": "Starter version->CVE dataset. Public CVE facts (IDs + affected ranges). Augment with a full NVD/Vulners feed via load_cve_db(); matching uses version_matches() semantics (<=, <, >=, >, ==, a-b, *).",
+  "roundcube": [
+    {"cve": "CVE-2025-49113", "affected": "<=1.6.10", "severity": "critical", "name": "Roundcube post-auth RCE (PHP object deserialization)"}
+  ],
+  "log4j": [
+    {"cve": "CVE-2021-44228", "affected": "2.0-2.14.1", "severity": "critical", "name": "Log4Shell JNDI RCE"}
+  ],
+  "apache": [
+    {"cve": "CVE-2021-41773", "affected": "==2.4.49", "severity": "high", "name": "Apache httpd path traversal / RCE"},
+    {"cve": "CVE-2021-42013", "affected": "2.4.49-2.4.50", "severity": "critical", "name": "Apache httpd path traversal / RCE"}
+  ],
+  "httpd": [
+    {"cve": "CVE-2021-41773", "affected": "==2.4.49", "severity": "high", "name": "Apache httpd path traversal / RCE"},
+    {"cve": "CVE-2021-42013", "affected": "2.4.49-2.4.50", "severity": "critical", "name": "Apache httpd path traversal / RCE"}
+  ],
+  "openssh": [
+    {"cve": "CVE-2024-6387", "affected": "8.5-9.7", "severity": "high", "name": "regreSSHion unauth RCE"}
+  ],
+  "confluence": [
+    {"cve": "CVE-2022-26134", "affected": "<7.18.1", "severity": "critical", "name": "Confluence OGNL injection RCE"}
+  ],
+  "spring-framework": [
+    {"cve": "CVE-2022-22965", "affected": "<5.3.18", "severity": "critical", "name": "Spring4Shell RCE"}
+  ],
+  "grafana": [
+    {"cve": "CVE-2021-43798", "affected": "8.0.0-8.3.0", "severity": "high", "name": "Grafana plugin path traversal"}
+  ],
+  "drupal": [
+    {"cve": "CVE-2018-7600", "affected": "<7.58", "severity": "critical", "name": "Drupalgeddon2 RCE"}
+  ],
+  "php": [
+    {"cve": "CVE-2024-4577", "affected": "<8.3.8", "severity": "critical", "name": "PHP-CGI argument injection RCE (Windows)"}
+  ],
+  "exim": [
+    {"cve": "CVE-2019-10149", "affected": "4.87-4.91", "severity": "critical", "name": "Exim deliver_message RCE"}
+  ],
+  "webmin": [
+    {"cve": "CVE-2019-15107", "affected": "<=1.920", "severity": "critical", "name": "Webmin password_change RCE"}
+  ]
+}

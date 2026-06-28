@@ -127,7 +127,7 @@ save_report(scanner)
 | Flag hunting | `FlagHunter`, `hunt_flags()` |
 | NFS enumeration | `NFSEnumerator` — exports, parent/sibling mounts, SSH-key/secret + UID-spoof scan |
 | Mail enumeration | `MailEnumerator` — IMAP login/spray (concurrent), mailbox secret harvest |
-| Template/CVE discovery | `nuclei_scan` (open nuclei templates) + `correlate_cves` (version→CVE feed) |
+| Template/CVE discovery | `builtin_template_scan` (bundled, offline) + `nuclei_scan` (auto-installs nuclei, refreshes templates) + `correlate_cves` (bundled CVE DB + live NVD feed) |
 | Payload wordlists | `WordlistLoader` — bundled SecLists lists + offline fallbacks |
 
 ## Knowledge Base & Second Brain
