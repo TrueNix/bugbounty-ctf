@@ -50,7 +50,7 @@ If source code is available, **you still test like you don't have it**. Reading 
 Before diving in, let the tooling tell you what you're dealing with:
 
 ```python
-exec(open("references/ctf_helper.py").read())
+exec(open("${HERMES_SKILL_DIR}/references/ctf_helper.py").read())
 
 result = analyze_challenge("/path/to/challenge_file")
 print(result["category"])       # "pwn/rev", "crypto", "forensics"
@@ -699,7 +699,7 @@ GET /render → check if "49" appears in rendered output
 ### Auto-Decoding Workflow
 
 ```python
-exec(open("references/ctf_helper.py").read())
+exec(open("${HERMES_SKILL_DIR}/references/ctf_helper.py").read())
 
 result = decode_all_encodings("dGVzdCBmbGFnIHtmbGFnX3Rlc3R9")
 print(result["flag_matches"])
@@ -846,6 +846,11 @@ Many CTF labs are **vulnerability identification exercises**, not flag-capture:
 - [ ] Only test on authorized targets
 
 ## Reference Index
+
+Paths below are relative to the skill directory. Hermes substitutes
+`${HERMES_SKILL_DIR}` with the absolute skill path at load time, so to open any
+bundled file reliably (regardless of the agent's cwd) prefix it, e.g.
+`open("${HERMES_SKILL_DIR}/references/payload-library.md")`.
 
 | File | Use when |
 |:-----|:---------|
