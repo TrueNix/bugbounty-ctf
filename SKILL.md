@@ -95,10 +95,20 @@ box.run(["mount", "-t", "nfs", "-o", "vers=3,nolock,ro",
 print(box.run("ls -laR /work/nfs").stdout)                   # loot is also on the host at ~/.hermes/kalibox/work/nfs
 ```
 
+**Vhosts: do NOT edit `/etc/hosts` (it needs host sudo).** Adding
+`10.129.x.x enigma.htb` to `/etc/hosts` is the #1 reason an agent hits a sudo
+prompt — and it's unnecessary. Resolve vhosts with the Host header instead:
+- Toolkit: `SecurityScanner("http://10.129.34.19/", headers={"Host": "enigma.htb"})`
+  then `map_surface(...)` / `discover_content(...)`.
+- Raw tools: `curl -H "Host: enigma.htb" …`, `gobuster -H "Host: enigma.htb" …`,
+  `kalibox ffuf -H "Host: enigma.htb" …`.
+- If a tool genuinely needs name resolution, add the entry **inside kalibox**
+  (root there, no host sudo): `kalibox shell -c "echo '10.129.34.19 enigma.htb' >> /etc/hosts"`.
+
 **Rule:** if a command would need `sudo` or special capabilities on the host,
-prefix it with `kalibox` instead. The earlier failure mode — burning minutes on
-`mount.nfs` not being setuid, then `sudo -n`, then `docker --privileged` on the
-host — is exactly what kalibox eliminates.
+prefix it with `kalibox` instead — never answer a host sudo prompt. The earlier
+failure modes — editing `/etc/hosts`, `mount.nfs` not being setuid, `sudo -n`,
+`docker --privileged` on the host — are exactly what kalibox eliminates.
 
 ## Step 0.5: Triage the Surface — Web is Not the Only Track
 
