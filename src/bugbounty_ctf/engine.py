@@ -15,12 +15,18 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import urljoin, urlparse
 
 import requests
 
 from bugbounty_ctf.scope import ScopeGuard
+
+if TYPE_CHECKING:
+    # Type-only import: engine must not hard-depend on patterns at runtime
+    # (patterns imports nothing from engine, but the pattern store methods take
+    # the concrete type) — the actual class is imported lazily inside methods.
+    from bugbounty_ctf.patterns import AttackPattern
 
 
 @dataclass(frozen=True)
@@ -402,11 +408,25 @@ class ScannerDB:
                 hyp_json TEXT NOT NULL,
                 timestamp TEXT
             );
+            CREATE TABLE IF NOT EXISTS patterns (
+                pattern_id TEXT PRIMARY KEY,
+                trigger_json TEXT,
+                steps_json TEXT,
+                outcome TEXT,
+                confidence REAL DEFAULT 0.0,
+                applied INTEGER DEFAULT 0,
+                worked INTEGER DEFAULT 0,
+                failed INTEGER DEFAULT 0,
+                provenance_json TEXT DEFAULT '[]',
+                created_at TEXT,
+                last_seen TEXT
+            );
             CREATE INDEX IF NOT EXISTS idx_findings_host ON findings(target_host);
             CREATE INDEX IF NOT EXISTS idx_findings_type ON findings(vuln_type);
             CREATE INDEX IF NOT EXISTS idx_history_host ON test_history(target_host);
             CREATE INDEX IF NOT EXISTS idx_obs_host ON observations(target_host);
             CREATE INDEX IF NOT EXISTS idx_hyp_host ON hypotheses(target_host);
+            CREATE INDEX IF NOT EXISTS idx_patterns_outcome ON patterns(outcome);
         """)
         self.conn.commit()
         self._migrate()
@@ -417,6 +437,31 @@ class ScannerDB:
         if "source" not in cols:
             # Provenance: which methodology/doc led to this finding.
             self.conn.execute("ALTER TABLE findings ADD COLUMN source TEXT DEFAULT ''")
+            self.conn.commit()
+
+        # Cross-engagement PATTERN tier (surface-keyed generalized chains). DBs
+        # created before this tier existed lack the table; create it idempotently
+        # so they pick it up without a destructive rebuild.
+        has_patterns = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='patterns'"
+        ).fetchone()
+        if has_patterns is None:
+            self.conn.executescript("""
+                CREATE TABLE IF NOT EXISTS patterns (
+                    pattern_id TEXT PRIMARY KEY,
+                    trigger_json TEXT,
+                    steps_json TEXT,
+                    outcome TEXT,
+                    confidence REAL DEFAULT 0.0,
+                    applied INTEGER DEFAULT 0,
+                    worked INTEGER DEFAULT 0,
+                    failed INTEGER DEFAULT 0,
+                    provenance_json TEXT DEFAULT '[]',
+                    created_at TEXT,
+                    last_seen TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_patterns_outcome ON patterns(outcome);
+            """)
             self.conn.commit()
 
     def save_finding(
@@ -671,6 +716,147 @@ class ScannerDB:
                 (target_host, limit),
             ).fetchall()
         return [json.loads(r["hyp_json"]) for r in rows]
+
+    # ----------------------------------------------------------- pattern tier
+    def save_pattern(self, pattern: AttackPattern) -> None:
+        """Persist a generalized attack pattern, merging on ``pattern_id``.
+
+        Mirrors :meth:`save_finding`'s dedup-and-refresh. A pattern_id collision
+        means the *same generalized chain over the same surface* was seen again
+        (possibly on a different box): counts ACCUMULATE (applied/worked/failed
+        add), provenance UNIONS, ``last_seen`` refreshes to the incoming value,
+        and confidence is recomputed from the merged worked/failed via
+        :func:`patterns.beta_confidence`. On first sight it is stored as-is.
+
+        The store only ever holds what :class:`patterns.PatternGuard` produced —
+        this method never validates content (the guard already did, fail-closed).
+        """
+        from bugbounty_ctf.patterns import beta_confidence
+
+        trigger = {
+            "ports": list(pattern.ports),
+            "tech": list(pattern.tech),
+            "capabilities": list(pattern.capabilities),
+        }
+        steps_json = json.dumps([s.to_dict() for s in pattern.steps])
+        existing = self.conn.execute(
+            """SELECT applied, worked, failed, provenance_json
+               FROM patterns WHERE pattern_id = ?""",
+            (pattern.pattern_id,),
+        ).fetchone()
+        if existing is not None:
+            applied = existing["applied"] + pattern.applied
+            worked = existing["worked"] + pattern.worked
+            failed = existing["failed"] + pattern.failed
+            try:
+                prior_prov = json.loads(existing["provenance_json"] or "[]")
+            except (json.JSONDecodeError, ValueError):
+                prior_prov = []
+            # Union provenance, preserving first-seen order.
+            merged_prov = list(dict.fromkeys([*prior_prov, *pattern.provenance]))
+            self.conn.execute(
+                """UPDATE patterns SET trigger_json = ?, steps_json = ?, outcome = ?,
+                   confidence = ?, applied = ?, worked = ?, failed = ?,
+                   provenance_json = ?, last_seen = ? WHERE pattern_id = ?""",
+                (
+                    json.dumps(trigger),
+                    steps_json,
+                    pattern.outcome,
+                    beta_confidence(worked, failed),
+                    applied,
+                    worked,
+                    failed,
+                    json.dumps(merged_prov),
+                    pattern.last_seen,
+                    pattern.pattern_id,
+                ),
+            )
+        else:
+            self.conn.execute(
+                """INSERT INTO patterns (pattern_id, trigger_json, steps_json, outcome,
+                   confidence, applied, worked, failed, provenance_json, created_at, last_seen)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    pattern.pattern_id,
+                    json.dumps(trigger),
+                    steps_json,
+                    pattern.outcome,
+                    pattern.confidence,
+                    pattern.applied,
+                    pattern.worked,
+                    pattern.failed,
+                    json.dumps(list(pattern.provenance)),
+                    pattern.created_at,
+                    pattern.last_seen,
+                ),
+            )
+        self.conn.commit()
+
+    def match_patterns(
+        self,
+        ports: tuple[int, ...],
+        tech: tuple[str, ...],
+        capabilities: tuple[str, ...],
+        *,
+        limit: int = 200,
+    ) -> list[AttackPattern]:
+        """Return candidate patterns ordered by confidence then proven wins.
+
+        Returns ALL stored candidates (up to ``limit``) — surface-aware Jaccard
+        ranking against ``ports``/``tech``/``capabilities`` is the caller's job
+        via :func:`patterns.rank_patterns`. The args document the recall surface
+        and reserve the signature for a later index-narrowed query.
+        """
+        from bugbounty_ctf.patterns import AttackPattern as _AttackPattern
+
+        rows = self.conn.execute(
+            """SELECT * FROM patterns
+               ORDER BY confidence DESC, worked DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        results: list[AttackPattern] = []
+        for row in rows:
+            try:
+                trigger = json.loads(row["trigger_json"] or "{}")
+                steps = json.loads(row["steps_json"] or "[]")
+                provenance = json.loads(row["provenance_json"] or "[]")
+            except (json.JSONDecodeError, ValueError):
+                continue
+            results.append(
+                _AttackPattern.from_dict(
+                    {
+                        "pattern_id": row["pattern_id"],
+                        "ports": trigger.get("ports", []),
+                        "tech": trigger.get("tech", []),
+                        "capabilities": trigger.get("capabilities", []),
+                        "steps": steps,
+                        "outcome": row["outcome"],
+                        "provenance": provenance,
+                        "confidence": row["confidence"],
+                        "applied": row["applied"],
+                        "worked": row["worked"],
+                        "failed": row["failed"],
+                        "created_at": row["created_at"],
+                        "last_seen": row["last_seen"],
+                    }
+                )
+            )
+        return results
+
+    def prune_patterns(self, *, min_confidence: float = 0.15, min_applied: int = 5) -> int:
+        """Delete patterns that have been tried enough yet keep failing.
+
+        A pattern is only pruned once it has been ``applied`` at least
+        ``min_applied`` times AND its confidence sits below ``min_confidence`` —
+        so a low-confidence-but-rarely-tried pattern is kept (it hasn't earned
+        deletion). Mirrors :meth:`prune_history`. Returns rows deleted.
+        """
+        cur = self.conn.execute(
+            "DELETE FROM patterns WHERE confidence < ? AND applied >= ?",
+            (min_confidence, min_applied),
+        )
+        self.conn.commit()
+        return cur.rowcount
 
     def close(self) -> None:
         if self._conn is not None:

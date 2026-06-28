@@ -62,6 +62,7 @@ from bugbounty_ctf.oast import (
 )
 from bugbounty_ctf.observations import Observation, ObservationStore, recommend_next_test
 from bugbounty_ctf.osint import OSINTToolkit
+from bugbounty_ctf.patterns import AttackPattern, PatternGuard
 from bugbounty_ctf.playbook import (
     Track,
     load_tracks,
@@ -109,6 +110,7 @@ from bugbounty_ctf.wordlists import WordlistLoader
 
 __all__ = [
     "AWSExploiter",
+    "AttackPattern",
     "ChainContext",
     "CryptoToolkit",
     "DiffAnalysis",
@@ -130,6 +132,7 @@ __all__ = [
     "Observation",
     "ObservationStore",
     "OutOfScopeError",
+    "PatternGuard",
     "PhaseGuidance",
     "PostExploit",
     "PwnToolkit",
