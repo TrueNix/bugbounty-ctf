@@ -414,44 +414,40 @@ dependent/sequential work yourself.
 
 You own the loop, but do not grind every service serially in your own context —
 that fills your context window and serial work (e.g. one mount/spray at a time)
-is what makes a run stall. Fan-out is the default for independent work. When a
-target exposes **independent tracks** — NFS, mail, web discovery, CVE
-correlation — fan them out to concurrent sub-agents and merge their findings
-centrally:
+is what makes a run stall. Parallelise independent tracks (NFS, mail, web, CVE)
+with **one synchronous call**.
 
-**Use `SkillOrchestrator.fan_out(...)` — NOT the harness `delegate_task` tool.**
-`fan_out` is **synchronous**: it blocks, runs all tracks concurrently, merges
-their findings, and **returns in the same turn** so you immediately continue to
-analysis and exploitation. The harness's background `delegate_task` dispatches
-fire-and-forget tasks and leaves your loop idle ("I'll resume when they
-finish") — the run **stalls and does not continue**. Do not use it for recon
-tracks. After `fan_out()` returns, you MUST act on `result` in the same turn:
-inspect the merged findings and proceed to the exploit phase — fanning out is one
-step of the loop, not the end of it.
+**Delegate with `SkillOrchestrator.run(...)` — NOT the harness `delegate_task`
+tool.** This is the single most important rule for not stalling. After the port
+scan, make exactly one blocking call:
 
 ```python
 from bugbounty_ctf.skill_runner import SkillOrchestrator
 
-runner = SkillOrchestrator("http://10.10.10.10/")
-result = runner.fan_out([
-    ("nfs",  "Enumerate NFS on 10.10.10.10 with bugbounty_ctf.nfs_enum.NFSEnumerator: "
-             "list exports, propose candidate mounts, and report uid_locked files to spoof."),
-    ("mail", "Enumerate IMAP/POP3 on 10.10.10.10 with bugbounty_ctf.mail_enum.MailEnumerator: "
-             "spray a small default-password list across discovered users, then harvest."),
-    ("web",  "Run discover_content() + map_surface() against http://10.10.10.10/ and "
-             "correlate any service version with correlate_cves()."),
-])
-print(result["merged"], "findings merged from", len(result["responses"]), "tracks")
+runner = SkillOrchestrator("http://10.129.34.19/")
+result = runner.run(mode="auto", ports=open_ports, tech=tech_hints)
+# ONE blocking call. Internally: select_tracks(ports, tech) → synchronous fan_out
+# of the parallel-safe tracks → findings merged into runner.scanner. Returns in
+# THIS turn with {"merged": N, "responses": {...}, "selected_tracks": [...]}.
+for f in runner.scanner.findings:      # act on the merged result NOW
+    print(f["type"], f.get("endpoint"))
+# → then CONTINUE in the same turn to the exploit phase. Do not stop here.
 ```
 
-`fan_out([(label, instruction), …])` spawns one `hermes -z` sub-agent **per
-track concurrently**, each with the shared scanner bootstrap, parses each one's
-`<FINDINGS>` block, and merges them (deduped) into your scanner. Wall-clock is
-the slowest single track, not their sum — and your own context stays clean for
-the exploit-chaining decisions that actually need your reasoning.
+**Why one synchronous call, and never the background `delegate_task`:** Hermes
+forces a top-level agent's `delegate_task` into *background* mode — it dispatches
+fire-and-forget and leaves your loop idle ("I'll resume when they finish. Keep
+chatting"), and the run **does not continue on its own**. `runner.run(...)` (and
+the `fan_out`/`hermes -z` it uses underneath) is **synchronous**: it blocks,
+runs all tracks concurrently, merges their `<FINDINGS>`, and **returns in the
+same turn** — so you keep driving straight into exploitation. Wall-clock is the
+slowest single track, not their sum, and your own context stays clean.
 
-**Rule of thumb:** if two pieces of work don't depend on each other's output,
-delegate them in one `fan_out()` call rather than running them back-to-back.
+`run(mode="auto", ports, tech)` picks the dispatch for you: ≥2 parallel-safe
+playbook tracks → fan them out; otherwise the per-phase flow. If you need custom
+tracks, call `runner.fan_out([(label, instruction), …])` directly — it has the
+same synchronous, returns-in-this-turn contract. Either way: **delegating is one
+step of the loop, not the end — act on the merged findings and proceed.**
 
 ### Phase 1: Reconnaissance (Map the surface)
 
