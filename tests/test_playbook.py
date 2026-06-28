@@ -6,6 +6,7 @@ module has no track, or if a track points at a dead import path.
 
 from __future__ import annotations
 
+from bugbounty_ctf import patterns
 from bugbounty_ctf.playbook import Track, load_tracks, resolve_entrypoint, select
 
 # Every shipped infra/capability entrypoint the manifest MUST surface a track for.
@@ -64,3 +65,11 @@ def test_drift_guard_every_track_entrypoint_imports() -> None:
     for track in load_tracks():
         resolved = resolve_entrypoint(track)
         assert resolved is not None, f"dead entrypoint: {track.entrypoint}"
+
+
+def test_drift_guard_every_track_capability_is_a_known_token() -> None:
+    for track in load_tracks():
+        assert track.capability in patterns.CAPABILITY_TOKENS, (
+            f"track {track.id!r} has capability {track.capability!r} "
+            "not in patterns.CAPABILITY_TOKENS"
+        )

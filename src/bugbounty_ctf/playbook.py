@@ -41,6 +41,7 @@ class Track:
     tech: tuple[str, ...]
     entrypoint: str
     parallel_safe: bool
+    capability: str
     reference: str
     instruction: str
     always: bool = False
@@ -71,6 +72,7 @@ def load_tracks() -> list[Track]:
                 tech=tuple(str(t) for t in tech),
                 entrypoint=str(entry["entrypoint"]),
                 parallel_safe=bool(entry["parallel_safe"]),
+                capability=str(entry["capability"]),
                 reference=str(entry["reference"]),
                 instruction=str(entry["instruction"]),
                 always=bool(entry.get("always", False)),

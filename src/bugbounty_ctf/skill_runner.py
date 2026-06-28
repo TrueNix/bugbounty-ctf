@@ -76,6 +76,11 @@ class SkillOrchestrator:
         self.scanner = scanner or SecurityScanner(target_url, delay=delay)
         self.kb = knowledge_base or KnowledgeBase()
         self.current_phase = "recon"
+        # Surface the run dispatched on — reused by :meth:`_writeback_pattern`
+        # to build the (generalized) trigger of a captured pattern. Set in
+        # :meth:`run` when ports/tech are provided; empty otherwise.
+        self._dispatch_ports: tuple[int, ...] = ()
+        self._dispatch_tech: tuple[str, ...] = ()
 
     def _query_rag(self, query: str, limit: int = 5) -> str:
         results = self.kb.search(query, limit=limit)
@@ -698,6 +703,9 @@ class SkillOrchestrator:
         # Write-back: persist what worked into the searchable knowledge base so
         # future runs recall it (the second-brain learning loop).
         final["lessons_written"] = self._writeback_lessons(confirmed)
+        # Capture: synthesize a generalized, surface-keyed pattern from the
+        # solved chain so a future run on a same-shaped box can recall it.
+        final["pattern_captured"] = self._writeback_pattern(confirmed)
 
         self.save_results()
         return final
@@ -732,6 +740,13 @@ class SkillOrchestrator:
         running agent) is unaffected — that remains the agent-owned loop.
         """
         from bugbounty_ctf import playbook
+
+        # Remember the surface this run dispatched on so a captured pattern's
+        # trigger reflects the ports/tech it actually ran against (generalized).
+        if ports is not None:
+            self._dispatch_ports = tuple(int(p) for p in ports)
+        if tech is not None:
+            self._dispatch_tech = tuple(str(t) for t in tech)
 
         def _parallel_tracks() -> list[playbook.Track]:
             tracks = playbook.select(ports, tech)
@@ -854,25 +869,50 @@ class SkillOrchestrator:
             merged += self._merge_agent_findings(self._parse_findings(response))
         if merged:
             print(f"[fan-out] Merged {merged} reported finding(s)")
-        return {"responses": responses, "merged": merged}
+
+        # Final step: persist what worked. Lessons (technique-level, secret-free)
+        # feed the per-host KB; the captured pattern (generalized, surface-keyed)
+        # feeds the cross-box pattern memory. Confirmed = the merged finding set.
+        confirmed = list(self.scanner.findings)
+        lessons = self._writeback_lessons(confirmed)
+        pattern_id = self._writeback_pattern(confirmed)
+        return {
+            "responses": responses,
+            "merged": merged,
+            "lessons_written": lessons,
+            "pattern_captured": pattern_id,
+        }
 
     def _writeback_lessons(self, findings: list[dict[str, Any]]) -> int:
-        """Record confirmed findings as searchable KB lessons. Returns count added."""
+        """Record confirmed findings as searchable KB lessons. Returns count added.
+
+        KB lessons are retrieved CROSS-TARGET (via FTS), so the lesson BODY must
+        carry no box-specific secrets: no raw payload, no raw target_url, and no
+        secret-shaped evidence. The body is generalized to the technique level
+        (vuln type + tech stack + a generalized endpoint *shape*), and every
+        retained free-text fragment is funneled through
+        :meth:`patterns.PatternGuard.redact` — fail-closed: a fragment that trips
+        the secret detector is OMITTED rather than baked in. The title/host stay
+        as-is: ``host`` is a DB column (not cross-target prose), not the body.
+        """
+        from bugbounty_ctf import patterns
+
         tech = self._format_discovered().get("tech_hints", [])
         written = 0
         for f in findings:
             vuln = str(f.get("type") or f.get("vuln_type") or "finding")
             endpoint = str(f.get("endpoint", ""))
-            payload = str(f.get("payload", ""))
-            evidence = "; ".join(str(d) for d in (f.get("details") or [])) or str(
-                f.get("evidence", "")
-            )
+            # Generalize the endpoint to a SHAPE: redact() strips host/path noise
+            # to placeholders and rejects (→ None) anything secret-shaped, in
+            # which case we omit the endpoint shape entirely (fail-closed).
+            endpoint_shape = patterns.PatternGuard.redact(endpoint) if endpoint else ""
+            tech_line = ", ".join(tech) if tech else "unknown"
             title = f"{vuln} on {self.scanner.host}{endpoint}"
-            body = (
-                f"Confirmed {vuln} at {endpoint} on {self.target_url}.\n"
-                f"Payload: {payload}\nEvidence: {evidence}\n"
-                f"Tech: {', '.join(tech) if tech else 'unknown'}"
-            )
+            body_lines = [f"Confirmed {vuln}."]
+            if endpoint_shape:
+                body_lines.append(f"Endpoint shape: {endpoint_shape}")
+            body_lines.append(f"Tech: {tech_line}")
+            body = "\n".join(body_lines)
             tags = ", ".join([vuln, *tech])
             try:
                 if self.kb.add_lesson(title, body, tags=tags, host=self.scanner.host, key=vuln):
@@ -882,6 +922,143 @@ class SkillOrchestrator:
         if written:
             print(f"[memory] Wrote {written} lesson(s) to the knowledge base")
         return written
+
+    # Generalized observable capabilities derived from a confirmed finding's
+    # type/source or a discovered tech hint. Keys are matched as substrings
+    # (lowercased) and values MUST be members of patterns.CAPABILITY_TOKENS.
+    _CAPABILITY_HINTS: tuple[tuple[str, str], ...] = (
+        ("nfs", "nfs_export"),
+        ("imap", "imap_open"),
+        ("mail", "imap_open"),
+        ("smtp", "smtp_open"),
+        ("smb", "smb_open"),
+        ("roundcube", "webmail_vhost"),
+        ("webmail", "webmail_vhost"),
+        ("cve", "version_banner"),
+        ("version", "version_banner"),
+        ("http", "web_app"),
+        ("web", "web_app"),
+    )
+
+    def _derive_capabilities(self, confirmed: list[dict[str, Any]]) -> tuple[str, ...]:
+        """Derive GENERALIZED surface capabilities (subset of CAPABILITY_TOKENS).
+
+        Observables only — read from the confirmed findings' type/source and the
+        discovered tech hints. No box-specific text enters: each candidate is a
+        closed token, and only tokens in :data:`patterns.CAPABILITY_TOKENS` are
+        emitted (PatternGuard re-filters anyway, fail-closed).
+        """
+        from bugbounty_ctf import patterns
+
+        haystacks: list[str] = []
+        for f in confirmed:
+            haystacks.append(str(f.get("type") or f.get("vuln_type") or "").lower())
+            haystacks.append(str(f.get("source") or "").lower())
+        haystacks.extend(t.lower() for t in self._format_discovered().get("tech_hints", []))
+
+        caps: list[str] = []
+        for needle, token in self._CAPABILITY_HINTS:
+            if token in caps:
+                continue
+            if token in patterns.CAPABILITY_TOKENS and any(needle in h for h in haystacks):
+                caps.append(token)
+        return tuple(caps)
+
+    # Outcome inference: RCE-terminal techniques win, then cred techniques.
+    _RCE_TECHNIQUES: frozenset[str] = frozenset(
+        {"admin_panel_backup_to_rce", "file_upload_rce", "ssti_rce", "cve_exploit"}
+    )
+    _CRED_TECHNIQUES: frozenset[str] = frozenset(
+        {
+            "cred_harvest_from_doc",
+            "cred_spray_mail_users",
+            "mailbox_secret_pivot",
+            "sqli_dump_creds",
+            "ssrf_metadata_creds",
+            "cred_reuse_ssh",
+            "su_local_cred_reuse",
+            "webadmin_login_reuse",
+        }
+    )
+
+    def _writeback_pattern(self, confirmed: list[dict[str, Any]]) -> str | None:
+        """Synthesize and store a GENERALIZED attack pattern from a solved chain.
+
+        This is the capture half of the pattern-memory loop. It builds a
+        surface-keyed, secret-free :class:`patterns.AttackPattern` from the
+        confirmed findings and persists it, so a chain that won here can be
+        recalled on a different box with the same shape. NO target specifics
+        enter the pattern: the trigger is generalized (ports/tech/capabilities),
+        each step's technique is a closed token, and each rationale comes from
+        :data:`patterns.TECHNIQUE_RATIONALES` (never a finding's payload or
+        evidence). :meth:`patterns.PatternGuard.build` is the fail-closed gate;
+        if it rejects the pattern (or there are < 2 steps), this returns ``None``.
+
+        Returns the saved ``pattern_id`` or ``None``.
+        """
+        from datetime import datetime
+
+        from bugbounty_ctf import patterns
+
+        if not confirmed:
+            return None
+
+        # Trigger: generalized surface only.
+        tech = tuple(str(t).lower() for t in self._format_discovered().get("tech_hints", []))
+        ports = self._dispatch_ports
+        capabilities = self._derive_capabilities(confirmed)
+
+        # Step sequence: ordered by the engine-recorded timestamp, mapped to
+        # closed technique tokens; unmapped findings are skipped; consecutive
+        # duplicate techniques are collapsed (preserving order).
+        ordered = sorted(confirmed, key=lambda f: str(f.get("timestamp", "")))
+        steps: list[patterns.TechniqueStep] = []
+        last_technique: str | None = None
+        for f in ordered:
+            key = str(f.get("type") or f.get("vuln_type") or "").lower()
+            technique = patterns.VULN_TO_TECHNIQUE.get(key)
+            if technique is None:
+                technique = patterns.VULN_TO_TECHNIQUE.get(str(f.get("source") or "").lower())
+            if technique is None or technique == last_technique:
+                continue
+            steps.append(
+                patterns.TechniqueStep(
+                    technique=technique,
+                    rationale=patterns.TECHNIQUE_RATIONALES.get(technique, ""),
+                    tool_hint="",
+                )
+            )
+            last_technique = technique
+
+        # A single step is not a pattern.
+        if len(steps) < 2:
+            return None
+
+        techniques = {s.technique for s in steps}
+        if techniques & self._RCE_TECHNIQUES:
+            outcome = "rce"
+        elif techniques & self._CRED_TECHNIQUES:
+            outcome = "cred_pivot"
+        else:
+            outcome = "foothold"
+
+        now = datetime.now().isoformat()
+        # Host-agnostic provenance: a timestamp tag, never the target host.
+        run_id = f"run-{now}"
+        pattern = patterns.PatternGuard.build(
+            ports=ports,
+            tech=tech,
+            capabilities=capabilities,
+            steps=tuple(steps),
+            outcome=outcome,
+            provenance=(run_id,),
+            now=now,
+        )
+        if pattern is None:
+            return None
+        self.scanner.db.save_pattern(pattern)
+        print(f"[memory] Captured pattern {pattern.pattern_id[:12]} ({outcome})")
+        return pattern.pattern_id
 
     @staticmethod
     def _build_verify_prompt(finding: dict[str, Any], target_url: str) -> str:

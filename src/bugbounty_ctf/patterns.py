@@ -135,6 +135,17 @@ VULN_TO_TECHNIQUE: dict[str, str | None] = {
     "sudo": "sudo_privesc",
     "cred_reuse": "cred_reuse_ssh",
     "ssh_cred_reuse": "cred_reuse_ssh",
+    "cred_harvest": "cred_harvest_from_doc",
+    "cred_leak": "cred_harvest_from_doc",
+    "doc_cred_leak": "cred_harvest_from_doc",
+    "cred_spray": "cred_spray_mail_users",
+    "mail_cred_spray": "cred_spray_mail_users",
+    "mailbox_pivot": "mailbox_secret_pivot",
+    "mail_secret": "mailbox_secret_pivot",
+    "webadmin_login": "webadmin_login_reuse",
+    "admin_login_reuse": "webadmin_login_reuse",
+    "backup_rce": "admin_panel_backup_to_rce",
+    "admin_backup_rce": "admin_panel_backup_to_rce",
 }
 
 # One GENERALIZED, secret-free sentence per technique. These ship with the

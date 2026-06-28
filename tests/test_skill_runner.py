@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -529,6 +530,7 @@ def _track(track_id: str, *, parallel_safe: bool = True) -> Any:
         tech=(),
         entrypoint="bugbounty_ctf.api:test_ssrf",
         parallel_safe=parallel_safe,
+        capability="web_app",
         reference="",
         instruction=f"instruction for {track_id}",
         always=False,
@@ -634,3 +636,109 @@ class TestSaveResults:
         out = tmp_path / "sub" / "results.json"
         path = runner.save_results(str(out))
         assert Path(path).exists()
+
+
+class TestWritebackPattern:
+    """Capture: synthesize a generalized, secret-free pattern from a solved chain."""
+
+    def _chain(self) -> list[dict[str, Any]]:
+        # Enigma-style chain: nfs doc cred → mail spray → mailbox pivot → web
+        # admin → backup rce. Each finding carries a raw payload/endpoint/secret
+        # the capture path must NOT bake into the pattern. Timestamps are out of
+        # order on purpose so capture must sort by them.
+        return [
+            {
+                "type": "backup_rce",
+                "endpoint": "http://support_001.enigma.htb/admin/backup",
+                "payload": "shell.php upload",
+                "timestamp": "2026-01-01T00:05:00",
+            },
+            {
+                "type": "nfs",
+                "endpoint": "/exports/docs/passwords.docx",
+                "payload": "kevin:Enigma2024!",
+                "timestamp": "2026-01-01T00:01:00",
+            },
+            {
+                "type": "cred_spray",
+                "endpoint": "imap://support_001.enigma.htb",
+                "payload": "kevin:Enigma2024!",
+                "timestamp": "2026-01-01T00:02:00",
+            },
+            {
+                "type": "webadmin_login",
+                "endpoint": "http://support_001.enigma.htb/admin",
+                "payload": "kevin:Enigma2024!",
+                "timestamp": "2026-01-01T00:04:00",
+            },
+        ]
+
+    def test_captures_pattern_with_two_plus_techniques(self, runner: SkillOrchestrator) -> None:
+        runner._dispatch_ports = (2049, 143, 80)
+        # A discovered tech hint must drive the generalized trigger.
+        runner.scanner.attack_surface = {"/": {"tech_hints": ["nginx"]}}
+
+        pattern_id = runner._writeback_pattern(self._chain())
+        assert pattern_id is not None
+
+        matched = runner.scanner.db.match_patterns((2049, 143, 80), ("nginx",), ())
+        ids = {p.pattern_id for p in matched}
+        assert pattern_id in ids
+
+    def test_saved_pattern_carries_no_raw_secret_or_host(self, runner: SkillOrchestrator) -> None:
+        runner._dispatch_ports = (2049, 143, 80)
+        runner.scanner.attack_surface = {"/": {"tech_hints": ["nginx"]}}
+
+        pattern_id = runner._writeback_pattern(self._chain())
+        assert pattern_id is not None
+
+        matched = runner.scanner.db.match_patterns((), (), ())
+        pattern = next(p for p in matched if p.pattern_id == pattern_id)
+
+        # Flatten EVERY field of the stored pattern to one blob.
+        blob = json.dumps(pattern.to_dict())
+        for secret in ("Enigma2024!", "support_001.enigma.htb", "shell.php", "kevin"):
+            assert secret not in blob, f"leaked {secret!r} into the captured pattern"
+
+        # Rationales must be the controlled TECHNIQUE_RATIONALES, not finding text.
+        from bugbounty_ctf import patterns
+
+        for step in pattern.steps:
+            assert step.rationale == patterns.TECHNIQUE_RATIONALES.get(step.technique, "")
+
+    def test_at_least_two_steps_required(self, runner: SkillOrchestrator) -> None:
+        runner._dispatch_ports = (80,)
+        single = [
+            {"type": "nfs", "endpoint": "/x", "payload": "p", "timestamp": "t1"},
+            # Unmapped vuln_type → skipped, leaving a single mapped step.
+            {"type": "totally_unknown", "endpoint": "/y", "payload": "q", "timestamp": "t2"},
+        ]
+        assert runner._writeback_pattern(single) is None
+        assert runner.scanner.db.match_patterns((), (), ()) == []
+
+    def test_empty_confirmed_returns_none(self, runner: SkillOrchestrator) -> None:
+        assert runner._writeback_pattern([]) is None
+
+
+class TestWritebackLessonsNoLeak:
+    """Deliverable B: KB lesson bodies are cross-target — must stay secret-free."""
+
+    def test_lesson_body_omits_raw_payload_and_host(self, runner: SkillOrchestrator) -> None:
+        n = runner._writeback_lessons(
+            [
+                {
+                    "type": "cred_leak",
+                    "endpoint": "http://support_001.enigma.htb/",
+                    "payload": "kevin:Enigma2024!",
+                    "details": ["password kevin:Enigma2024! recovered"],
+                }
+            ]
+        )
+        assert n == 1
+        kb = runner.kb
+        assert isinstance(kb, _FakeKB)
+        bodies = [body for _, body in kb.lessons]
+        assert bodies, "expected a lesson body"
+        for body in bodies:
+            assert "Enigma2024!" not in body
+            assert "support_001.enigma.htb" not in body
