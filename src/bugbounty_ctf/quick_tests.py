@@ -502,15 +502,16 @@ def discover_content(
     wordlist: list[str] | None = None,
     extensions: list[str] | None = None,
     limit: int = 0,
+    workers: int = 16,
 ) -> list[dict[str, Any]]:
     """Brute-force content/paths against a target using a wordlist.
 
     Loads the bundled ``dirbrute`` wordlist by default (overridable via
-    ``wordlist``) and requests each candidate path, reporting entries that are
-    not 404s. To avoid the PHP-dev-server false-positive trap (every path
-    returns 200 with identical length — see the methodology notes), responses
-    whose ``(status, length)`` pair matches a dominant baseline signature are
-    filtered out.
+    ``wordlist``) and requests each candidate path **concurrently** (a single
+    sequential pass times out against remote targets). To avoid the
+    PHP-dev-server false-positive trap (every path returns 200 with identical
+    length), responses whose ``(status, length)`` pair matches a dominant
+    baseline signature are filtered out.
 
     Args:
         base_url: Target origin (path component is ignored).
@@ -518,6 +519,7 @@ def discover_content(
         wordlist: Explicit candidate list; defaults to the bundled dirbrute list.
         extensions: Optional extensions to append to each word (e.g. ['php','bak']).
         limit: If > 0, cap the number of words tried (useful for quick passes).
+        workers: Concurrent request workers (set 1 to force a sequential scan).
     """
     scanner = _get_scanner(base_url, scanner)
     origin = derive_base_url(base_url)
@@ -535,27 +537,34 @@ def discover_content(
         for ext in extensions or []:
             candidates.append(f"{w}.{ext.lstrip('.')}")
 
-    print(f"[*] Content discovery on {origin} — {len(candidates)} candidates")
+    print(f"[*] Content discovery on {origin} — {len(candidates)} candidates ({workers} workers)")
 
-    raw: list[dict[str, Any]] = []
-    signature_counts: dict[tuple[int, int], int] = {}
-    for path in candidates:
+    def probe(path: str) -> dict[str, Any] | None:
         target = urljoin(origin + "/", path)
         r = scanner._make_request("GET", target)
         if r.status_code in (404, 0):
-            continue
-        sig = (r.status_code, len(r.text))
-        signature_counts[sig] = signature_counts.get(sig, 0) + 1
-        raw.append(
-            {
-                "path": path,
-                "url": target,
-                "status": r.status_code,
-                "length": len(r.text),
-                "location": r.headers.get("Location", ""),
-                "_sig": sig,
-            }
-        )
+            return None
+        return {
+            "path": path,
+            "url": target,
+            "status": r.status_code,
+            "length": len(r.text),
+            "location": r.headers.get("Location", ""),
+            "_sig": (r.status_code, len(r.text)),
+        }
+
+    raw: list[dict[str, Any]] = []
+    if workers <= 1:
+        raw = [item for path in candidates if (item := probe(path)) is not None]
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            raw = [item for item in pool.map(probe, candidates) if item is not None]
+
+    signature_counts: dict[tuple[int, int], int] = {}
+    for item in raw:
+        signature_counts[item["_sig"]] = signature_counts.get(item["_sig"], 0) + 1
 
     # Drop the dominant signature when it swamps results — that is the
     # catch-all routing pattern, not real discovered content.

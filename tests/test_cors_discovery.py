@@ -75,6 +75,22 @@ class TestContentDiscovery:
         assert "admin" in paths
         assert "missing" not in paths
 
+    def test_concurrent_and_sequential_agree(self) -> None:
+        # workers>1 (default) must return the same set as a sequential scan.
+        def make_scanner() -> SecurityScanner:
+            sc = _scanner()
+
+            def fake(method: str, url: str, **kwargs: Any) -> _Resp:
+                return _Resp(200, "hit") if url.rstrip("/").endswith(("/a", "/c")) else _Resp(404)
+
+            sc._make_request = fake  # type: ignore[method-assign]
+            return sc
+
+        words = ["a", "b", "c", "d", "e"]
+        seq = discover_content("http://t.test/", scanner=make_scanner(), wordlist=words, workers=1)
+        con = discover_content("http://t.test/", scanner=make_scanner(), wordlist=words, workers=8)
+        assert {r["path"] for r in seq} == {r["path"] for r in con} == {"a", "c"}
+
     def test_filters_catch_all_signature(self) -> None:
         # Simulate a PHP dev server: every path returns 200 with identical
         # length. The dominant signature must be filtered out.
