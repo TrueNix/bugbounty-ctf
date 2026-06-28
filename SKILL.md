@@ -209,6 +209,22 @@ from bugbounty_ctf.api import (
 scanner = SecurityScanner("http://target/")
 ```
 
+**HTB targets = IP + vhost.** Set the `Host` header on the scanner, then drive
+discovery in-process (no shelling out to gobuster):
+
+```python
+from bugbounty_ctf import SecurityScanner
+from bugbounty_ctf.api import map_surface, discover_content
+# HTB = IP + vhost: set the Host header on the scanner, then use IN-PROCESS discovery
+scanner = SecurityScanner("http://10.129.34.19/", headers={"Host": "enigma.htb"})
+surface = map_surface("http://10.129.34.19/", scanner=scanner)
+found   = discover_content("http://10.129.34.19/", scanner=scanner)  # bundled wordlist, no gobuster needed
+```
+
+- Prefer in-process `discover_content` (ships its own `dirbrute` wordlist) over `gobuster` in kalibox — avoids wordlist-path guessing. If you DO need gobuster, SecLists is at `/usr/share/seclists/...` inside kalibox.
+- Mail spray: get candidate USERS from recon first (NFS onboarding docs, emails on the site like `support@enigma.htb`), and keep the password list SMALL (≤~15). A 30×75 blind spray over TLS times out even though `spray()` is concurrent.
+- NFS: if the advertised export is empty, try `nfs.candidate_mounts(exports)` (parents/siblings like `/srv/nfs`, `/home`) — servers often serve paths `showmount` doesn't list.
+
 **Quick testing functions available after loading:**
 - `test_login_sqli(url, scanner=scanner)` — Test login form for SQL injection
 - `test_ssti(url, method, param_name, scanner=scanner)` — Test for SSTI

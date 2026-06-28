@@ -51,6 +51,17 @@ class TestSecurityScannerInit:
         scanner = SecurityScanner("http://target/", respect_waf=True)
         assert scanner.respect_waf is True
 
+    def test_custom_header_set_on_session(self) -> None:
+        scanner = SecurityScanner("http://target/", headers={"Host": "enigma.htb"})
+        assert scanner.session.headers["Host"] == "enigma.htb"
+
+    @responses.activate
+    def test_custom_header_sent_on_request(self) -> None:
+        responses.add(responses.GET, "http://t/probe", json={"ok": True}, status=200)
+        scanner = SecurityScanner("http://t/", headers={"Host": "enigma.htb"})
+        scanner._make_request("GET", "http://t/probe")
+        assert responses.calls[0].request.headers["Host"] == "enigma.htb"
+
 
 class TestSecurityScannerMakeRequest:
     @responses.activate

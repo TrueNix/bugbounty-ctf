@@ -223,3 +223,26 @@ class TestCli:
 
         monkeypatch.setattr(kb, "_default_runner", boom)
         assert main(["up"]) == 127
+
+    def test_shell_with_dash_c_runs_command(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = FakeRuntime()
+        fake.reply(("ps", "--filter"), stdout="kalibox\n")  # container running
+        import bugbounty_ctf.kalibox as kb
+
+        monkeypatch.setattr(kb, "_default_runner", fake)
+        assert main(["shell", "-c", "id"]) == 0
+        assert any(
+            FakeRuntime._contains_subseq(c, ("exec", "kalibox", "bash", "-lc", "id"))
+            for c in fake.calls
+        )
+
+    def test_shell_argv_form_runs_command(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = FakeRuntime()
+        fake.reply(("ps", "--filter"), stdout="kalibox\n")  # container running
+        import bugbounty_ctf.kalibox as kb
+
+        monkeypatch.setattr(kb, "_default_runner", fake)
+        assert main(["shell", "ls", "-la"]) == 0
+        assert any(
+            FakeRuntime._contains_subseq(c, ("exec", "kalibox", "ls", "-la")) for c in fake.calls
+        )

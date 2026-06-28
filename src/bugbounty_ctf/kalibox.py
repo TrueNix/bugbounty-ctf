@@ -293,12 +293,19 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write(f"[kalibox] destroyed: {box.name}\n")
             return 0
         if sub == "shell":
-            box.start()
-            try:
-                os.execvp(box.runtime, [box.runtime, "exec", "-it", box.name, "bash"])
-            except OSError as e:
-                sys.stderr.write(f"[kalibox] exec failed: {e}\n")
-                return 1
+            rest = args[1:]
+            if not rest:
+                box.start()
+                try:
+                    os.execvp(box.runtime, [box.runtime, "exec", "-it", box.name, "bash"])
+                except OSError as e:
+                    sys.stderr.write(f"[kalibox] exec failed: {e}\n")
+                    return 1
+            box.ensure(provision=False)
+            result = box.run(" ".join(rest[1:])) if rest[0] == "-c" else box.run(rest)
+            sys.stdout.write(result.stdout)
+            sys.stderr.write(result.stderr)
+            return result.returncode
 
         # Default: run the whole argv as a command inside the container.
         box.ensure(provision=True)
