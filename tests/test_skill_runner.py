@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -33,8 +32,9 @@ class _FakeKB:
 
 @pytest.fixture
 def runner(tmp_path: Path) -> SkillOrchestrator:
-    # Isolate state_file per test — otherwise _save_state() writes to the shared
-    # default path (~/.hermes/state/<host>.json) and leaks findings across tests.
+    # Isolate the snapshot path per test — otherwise save_snapshot() writes to
+    # the shared default (~/.hermes/state/<host>.json). The in-memory ScannerDB
+    # already isolates the authoritative store per test.
     scanner = SecurityScanner(
         "http://target.test/",
         state_file=str(tmp_path / "state.json"),
@@ -96,46 +96,63 @@ class TestPromptBuilding:
 
 class TestFeedForward:
     """The sub-agent workflow must build each phase from current state and
-    aggregate findings sub-agents persist (the old code snapshotted all four
-    phases upfront and never reloaded)."""
+    aggregate findings sub-agents persist to the shared ScannerDB (the single
+    source of truth). The old code snapshotted all four phases upfront and never
+    reloaded; persistence used to ride on a JSON state file."""
 
-    def _orchestrator(self, tmp_path: Path) -> SkillOrchestrator:
+    def _orchestrator(self, db: ScannerDB, tmp_path: Path) -> SkillOrchestrator:
         scanner = SecurityScanner(
             "http://target.test/",
             state_file=str(tmp_path / "state.json"),
-            db=ScannerDB(":memory:"),
+            db=db,
         )
         return SkillOrchestrator("http://target.test/", scanner=scanner, knowledge_base=_FakeKB())
 
     def test_guidance_is_built_lazily_and_findings_accumulate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        orch = self._orchestrator(tmp_path)
+        # Shared file-backed DB so the simulated sub-agent (a separate scanner
+        # bound to the same DB path) and the orchestrator use one store.
+        db_path = str(tmp_path / "shared.db")
+        orch = self._orchestrator(ScannerDB(db_path), tmp_path)
         seen_prev_counts: list[int] = []
 
         def fake_spawn(guidance: PhaseGuidance, *, timeout: int = 120) -> str:
             # Record what THIS phase saw, proving guidance is built lazily.
             seen_prev_counts.append(len(guidance.previous_findings))
-            # Simulate a sub-agent persisting one finding to the shared state.
-            new_finding = {"type": f"vuln_{guidance.phase}", "endpoint": "/x"}
-            state = {
-                "base_url": guidance.target_url,
-                "findings": [*orch.scanner.findings, new_finding],
-                "test_history": [],
-                "attack_surface": {},
-                "defenses_detected": [],
-            }
-            Path(guidance.state_file).write_text(json.dumps(state))
+            # Simulate a sub-agent persisting one finding through a scanner
+            # bound to the SAME ScannerDB the orchestrator reads back — the
+            # single-store feed-forward path the bootstrap wires up.
+            sub = SecurityScanner(
+                guidance.target_url,
+                state_file=str(tmp_path / f"sub_{guidance.phase}.json"),
+                db=ScannerDB(guidance.db_path),
+            )
+            sub._record_finding(
+                "/x", "GET", "", ["agent_reported:high"], [], f"vuln_{guidance.phase}"
+            )
             return "ok"
 
         monkeypatch.setattr(orch, "spawn_agent", fake_spawn)
         final = orch.run_with_agents(verify=False)
 
-        # One finding persisted per phase, reloaded and carried forward.
+        # One distinct finding persisted per phase, reloaded and carried forward.
         assert final["total_findings"] == len(orch.PHASES)
         # fuzz/exploit guidance saw findings the earlier agents persisted.
         assert seen_prev_counts[-1] > 0
         assert seen_prev_counts == sorted(seen_prev_counts)
+
+    def test_subagent_via_db_save_finding_is_picked_up(self, tmp_path: Path) -> None:
+        # A sub-agent that persists straight through db.save_finding (not a
+        # SecurityScanner) is still visible after the orchestrator reloads.
+        db_path = str(tmp_path / "shared.db")
+        orch = self._orchestrator(ScannerDB(db_path), tmp_path)
+
+        ScannerDB(db_path).save_finding(
+            orch.scanner.host, "/login", "sqli", payload="'", confidence=0.9
+        )
+        orch._reload_state()
+        assert any(f["type"] == "sqli" and f["endpoint"] == "/login" for f in orch.scanner.findings)
 
 
 class TestSecondBrain:

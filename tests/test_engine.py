@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
+import json
+from pathlib import Path
 
 import pytest
 import responses
 
-from bugbounty_ctf.engine import SecurityScanner, derive_base_url
+from bugbounty_ctf.engine import ScannerDB, SecurityScanner, derive_base_url
 
 
 class TestDeriveBaseUrl:
@@ -156,35 +156,65 @@ class TestSecurityScannerMapSurface:
 
 
 class TestSecurityScannerStatePersistence:
-    def test_state_save_and_load(self) -> None:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            state_file = f.name
+    def test_findings_persist_via_db_across_instances(self, tmp_path: Path) -> None:
+        # The ScannerDB is the single source of truth: a new SecurityScanner
+        # bound to the same DB reloads prior findings on init — no JSON read.
+        db = ScannerDB(str(tmp_path / "scanner.db"))
+        scanner = SecurityScanner("http://target/", state_file=str(tmp_path / "s.json"), db=db)
+        scanner._record_finding("/x", "GET", "'", ["sqli"], ["SQL error"], "sqli")
 
-        try:
-            scanner = SecurityScanner("http://target/", state_file=state_file)
-            scanner.findings.append({"type": "test_finding"})
-            scanner._save_state()
+        scanner2 = SecurityScanner(
+            "http://target/",
+            state_file=str(tmp_path / "s.json"),
+            db=ScannerDB(str(tmp_path / "scanner.db")),
+        )
+        assert len(scanner2.findings) == 1
+        assert scanner2.findings[0]["type"] == "sqli"
 
-            # New scanner should load the saved state
-            scanner2 = SecurityScanner("http://target/", state_file=state_file)
-            assert len(scanner2.findings) == 1
-            assert scanner2.findings[0]["type"] == "test_finding"
-        finally:
-            if os.path.exists(state_file):
-                os.remove(state_file)
+    def test_save_snapshot_writes_artifact_not_required_for_persistence(
+        self, tmp_path: Path
+    ) -> None:
+        # save_snapshot writes a derived JSON artifact, but persistence does not
+        # depend on it: a fresh scanner reloads from the DB even with no file.
+        db_path = str(tmp_path / "scanner.db")
+        snap = tmp_path / "snapshot.json"
+        scanner = SecurityScanner("http://target/", state_file=str(snap), db=ScannerDB(db_path))
+        scanner._record_finding("/x", "GET", "'", ["sqli"], ["SQL error"], "sqli")
+        assert not snap.exists()  # _record_finding does NOT write the artifact
 
-    def test_state_load_silent_failure_on_corrupt_file(self) -> None:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            f.write("{invalid json")
-            state_file = f.name
+        written = scanner.save_snapshot()
+        assert written == str(snap)
+        assert snap.exists()
+        data = json.loads(snap.read_text())
+        assert data["base_url"] == "http://target"
+        assert any(f["type"] == "sqli" for f in data["findings"])
 
-        try:
-            # Should not raise — silently ignores corrupt state
-            scanner = SecurityScanner("http://target/", state_file=state_file)
-            assert scanner.findings == []
-        finally:
-            if os.path.exists(state_file):
-                os.remove(state_file)
+        # Delete the artifact entirely; the DB still drives persistence.
+        snap.unlink()
+        scanner3 = SecurityScanner("http://target/", state_file=str(snap), db=ScannerDB(db_path))
+        assert len(scanner3.findings) == 1
+
+    def test_reload_picks_up_findings_from_shared_db(self, tmp_path: Path) -> None:
+        # Two scanners sharing one ScannerDB see each other's findings after
+        # reload() — proves single-store cross-agent feed-forward.
+        db = ScannerDB(str(tmp_path / "shared.db"))
+        a = SecurityScanner("http://target/", state_file=str(tmp_path / "a.json"), db=db)
+        b = SecurityScanner("http://target/", state_file=str(tmp_path / "b.json"), db=db)
+
+        a._record_finding("/login", "POST", "' OR 1=1--", ["sqli"], ["err"], "sqli")
+        assert b.findings == []  # not visible until reload
+
+        b.reload()
+        assert any(f["type"] == "sqli" and f["endpoint"] == "/login" for f in b.findings)
+
+    def test_reload_tolerates_empty_db(self, tmp_path: Path) -> None:
+        # A scanner against a brand-new DB starts with no findings, no error.
+        scanner = SecurityScanner(
+            "http://target/", state_file=str(tmp_path / "s.json"), db=ScannerDB(":memory:")
+        )
+        assert scanner.findings == []
+        scanner.reload()
+        assert scanner.findings == []
 
 
 class TestSecurityScannerPayloadSet:

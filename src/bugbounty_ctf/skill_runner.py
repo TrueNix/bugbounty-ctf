@@ -388,9 +388,11 @@ class SkillOrchestrator:
         return guidance
 
     def _reload_state(self) -> None:
-        """Re-read findings/surface a sub-agent persisted, so the next phase
-        (and the final report) reflect what it discovered."""
-        self.scanner._load_state()
+        """Re-read findings/surface a sub-agent persisted to the shared
+        ScannerDB, so the next phase (and the final report) reflect what it
+        discovered. There is a single store now, so this is a DB re-query — no
+        JSON read, no clobber-ordering dance."""
+        self.scanner.reload()
 
     class HermesNotFoundError(RuntimeError):
         """Raised when the `hermes` binary is not on PATH."""
@@ -670,15 +672,15 @@ class SkillOrchestrator:
             print(f"\n[{phase.upper()}] Response preview:")
             print(response[:500])
 
-            # Order matters: first pull in anything the sub-agent persisted to
-            # the shared store directly, THEN merge its declared <FINDINGS> on
-            # top and persist the result — otherwise the next reload would
-            # clobber the in-memory merge (which only touched memory + DB).
+            # Single store: reload from the shared ScannerDB to pull in anything
+            # the sub-agent persisted directly, then merge its declared
+            # <FINDINGS> on top. _merge_agent_findings persists each new finding
+            # to the same DB, so the merged set is already durable — no
+            # round-trip needed to reconcile two stores.
             self._reload_state()
             merged = self._merge_agent_findings(self._parse_findings(response))
             if merged:
                 print(f"[{phase}] Merged {merged} reported finding(s)")
-                self.scanner._save_state()
 
         final = self.collect_results()
         final["agent_responses"] = results
@@ -783,16 +785,16 @@ class SkillOrchestrator:
             for label, response in pool.map(run_one, prompts):
                 responses[label] = response
 
-        # Order matters: all workers have exited, so reload any state a sub-agent
-        # persisted directly BEFORE merging declared <FINDINGS> on top — otherwise
-        # _save_state() would clobber what the sub-agents wrote.
+        # All workers have exited. Single store: reload from the shared
+        # ScannerDB to pull in what sub-agents persisted directly, then merge
+        # declared <FINDINGS> on top. _merge_agent_findings persists each new
+        # finding to the same DB, so the merged set is already durable.
         self._reload_state()
         merged = 0
         for response in responses.values():
             merged += self._merge_agent_findings(self._parse_findings(response))
         if merged:
             print(f"[fan-out] Merged {merged} reported finding(s)")
-            self.scanner._save_state()
         return {"responses": responses, "merged": merged}
 
     def _writeback_lessons(self, findings: list[dict[str, Any]]) -> int:

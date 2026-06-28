@@ -377,6 +377,11 @@ class ScannerDB:
                 surface_json TEXT NOT NULL,
                 timestamp TEXT
             );
+            CREATE TABLE IF NOT EXISTS defenses (
+                target_host TEXT PRIMARY KEY,
+                defenses_json TEXT NOT NULL,
+                timestamp TEXT
+            );
             CREATE TABLE IF NOT EXISTS observations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 target_host TEXT NOT NULL,
@@ -516,6 +521,51 @@ class ScannerDB:
             (target_host, start_url, json.dumps(surface), datetime.now().isoformat()),
         )
         self.conn.commit()
+
+    def latest_surface_for_host(self, target_host: str) -> dict[str, Any]:
+        """Rebuild the attack_surface map (start_url → surface) from the DB.
+
+        ``save_surface`` appends a row each time a path is (re-)mapped; this
+        returns the most recent surface for every distinct ``start_url`` so the
+        DB is an authoritative reload source for the in-memory map.
+        """
+        rows = self.conn.execute(
+            """SELECT start_url, surface_json FROM attack_surface
+               WHERE target_host = ? ORDER BY id ASC""",
+            (target_host,),
+        ).fetchall()
+        surface: dict[str, Any] = {}
+        for row in rows:
+            try:
+                surface[row["start_url"]] = json.loads(row["surface_json"])
+            except (json.JSONDecodeError, ValueError):
+                continue
+        return surface
+
+    def save_defenses(self, target_host: str, defenses: list[str]) -> None:
+        """Persist the detected-defenses list for a host (one row per host)."""
+        self.conn.execute(
+            """INSERT INTO defenses (target_host, defenses_json, timestamp)
+               VALUES (?, ?, ?)
+               ON CONFLICT(target_host) DO UPDATE SET
+                   defenses_json = excluded.defenses_json,
+                   timestamp = excluded.timestamp""",
+            (target_host, json.dumps(defenses), datetime.now().isoformat()),
+        )
+        self.conn.commit()
+
+    def defenses_for_host(self, target_host: str) -> list[str]:
+        row = self.conn.execute(
+            "SELECT defenses_json FROM defenses WHERE target_host = ?",
+            (target_host,),
+        ).fetchone()
+        if row is None:
+            return []
+        try:
+            value = json.loads(row["defenses_json"])
+        except (json.JSONDecodeError, ValueError):
+            return []
+        return list(value) if isinstance(value, list) else []
 
     def query_findings(self, where: str = "", params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
         sql = "SELECT * FROM findings"
@@ -662,25 +712,61 @@ class SecurityScanner:
         self.captured_tokens: dict[str, str] = {}
         self.captured_cookies: dict[str, str] = {}
         self.db = db or ScannerDB()
-        self._load_state()
+        self.reload()
 
-    def _load_state(self) -> None:
-        """Load previous testing state from per-target JSON file."""
-        if not os.path.exists(self.state_file):
-            return
-        try:
-            with open(self.state_file) as f:
-                state = json.load(f)
-            if state.get("base_url") == self.base_url:
-                self.findings = state.get("findings", [])
-                self.test_history = state.get("test_history", [])
-                self.attack_surface = state.get("attack_surface", {})
-                self.defenses_detected = state.get("defenses_detected", [])
-        except (OSError, json.JSONDecodeError):
-            pass
+    @staticmethod
+    def _finding_from_row(row: dict[str, Any]) -> dict[str, Any]:
+        """Rebuild the in-memory finding dict shape from a ScannerDB row.
 
-    def _save_state(self) -> None:
-        """Save current testing state to per-target JSON file."""
+        The DB is the source of truth; this maps a stored row back onto the
+        dict shape :meth:`_record_finding` produces so reloaded findings are
+        indistinguishable from freshly recorded ones.
+        """
+
+        def _as_list(value: Any) -> list[Any]:
+            if isinstance(value, list):
+                return value
+            try:
+                parsed = json.loads(value) if isinstance(value, str) else []
+            except (json.JSONDecodeError, ValueError):
+                return []
+            return parsed if isinstance(parsed, list) else []
+
+        return {
+            "type": row.get("vuln_type") or "potential_vulnerability",
+            "endpoint": row.get("endpoint", ""),
+            "method": row.get("method", ""),
+            "payload": row.get("payload", ""),
+            "indicators": _as_list(row.get("indicators")),
+            "details": _as_list(row.get("details")),
+            "source": row.get("source", ""),
+            "timestamp": row.get("timestamp", ""),
+        }
+
+    def reload(self) -> None:
+        """Re-read findings / attack surface / defenses from the ScannerDB.
+
+        The ScannerDB is the single source of truth. This is what cross-agent
+        feed-forward uses: a sub-agent persists findings through a scanner bound
+        to the same DB path, and the orchestrator calls ``reload()`` to pick
+        them up. The JSON ``state_file`` is never read back here — it is a
+        derived snapshot artifact only (see :meth:`save_snapshot`).
+        """
+        rows = self.db.findings_for_host(self.host, limit=10_000)
+        # findings_for_host returns most-recent-first; restore chronological
+        # order so the in-memory list matches record-time ordering.
+        self.findings = [self._finding_from_row(r) for r in reversed(rows)]
+        self.attack_surface = self.db.latest_surface_for_host(self.host)
+        self.defenses_detected = self.db.defenses_for_host(self.host)
+
+    def save_snapshot(self, path: str | None = None) -> str:
+        """Write the current state to JSON as a human-readable ARTIFACT.
+
+        This is derived output, never an authoritative reload source — the DB is
+        the source of truth (see :meth:`reload`). Defaults to ``self.state_file``
+        (the old per-target location). Returns the path written.
+        """
+        target = path or self.state_file
         state = {
             "base_url": self.base_url,
             "findings": self.findings[-500:],
@@ -689,11 +775,12 @@ class SecurityScanner:
             "defenses_detected": self.defenses_detected,
             "updated_at": datetime.now().isoformat(),
         }
-        parent = os.path.dirname(self.state_file)
+        parent = os.path.dirname(target)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        with open(self.state_file, "w") as f:
+        with open(target, "w") as f:
             json.dump(state, f, indent=2)
+        return target
 
     def _effective_delay(self) -> float:
         """Compute effective delay, accounting for WAF and rate limits."""
@@ -811,10 +898,12 @@ class SecurityScanner:
         vuln_type: str = "",
         source: str = "",
     ) -> None:
-        """Record a finding in memory, JSON state, and SQLite.
+        """Record a finding in the in-memory cache and the ScannerDB.
 
-        ``source`` is provenance — the methodology doc, phase, or tool that led
-        to the finding — persisted alongside it for later audit.
+        The ScannerDB is the single source of truth; there is no JSON dual-write
+        (the JSON ``state_file`` is a derived snapshot only — see
+        :meth:`save_snapshot`). ``source`` is provenance — the methodology doc,
+        phase, or tool that led to the finding — persisted alongside it.
         """
         finding = {
             "type": vuln_type or "potential_vulnerability",
@@ -926,7 +1015,8 @@ class SecurityScanner:
                     vuln_type,
                 )
 
-        self._save_state()
+        self.db.save_defenses(self.host, self.defenses_detected)
+        self.save_snapshot()
         return results
 
     def map_surface(self, start_url: str = "/") -> dict[str, Any]:
@@ -979,7 +1069,8 @@ class SecurityScanner:
 
         self.attack_surface[start_url] = surface
         self.db.save_surface(self.host, start_url, surface)
-        self._save_state()
+        self.db.save_defenses(self.host, self.defenses_detected)
+        self.save_snapshot()
         return surface
 
     def _detect_technology(self, response: requests.Response) -> list[str]:
