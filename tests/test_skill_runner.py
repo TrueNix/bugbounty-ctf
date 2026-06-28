@@ -520,7 +520,7 @@ class TestFanOut:
         assert any(f["type"] == "nfs-export" for f in runner.scanner.findings)
 
 
-def _track(track_id: str, *, parallel_safe: bool = True) -> Any:
+def _track(track_id: str, *, parallel_safe: bool = True, capability: str = "web_app") -> Any:
     from bugbounty_ctf.playbook import Track
 
     return Track(
@@ -530,7 +530,7 @@ def _track(track_id: str, *, parallel_safe: bool = True) -> Any:
         tech=(),
         entrypoint="bugbounty_ctf.api:test_ssrf",
         parallel_safe=parallel_safe,
-        capability="web_app",
+        capability=capability,
         reference="",
         instruction=f"instruction for {track_id}",
         always=False,
@@ -718,6 +718,192 @@ class TestWritebackPattern:
 
     def test_empty_confirmed_returns_none(self, runner: SkillOrchestrator) -> None:
         assert runner._writeback_pattern([]) is None
+
+
+def _seed_enigma_pattern(runner: SkillOrchestrator) -> str:
+    """Capture a 4-step pattern (nfs → mail → web admin → backup-rce) and return id.
+
+    The step ORDER (nfs before web) is the knowledge a recall front-loads on.
+    """
+    runner._dispatch_ports = (2049, 143, 80)
+    runner.scanner.attack_surface = {"/": {"tech_hints": ["nginx"]}}
+    chain = [
+        {"type": "nfs", "endpoint": "/exports/x", "payload": "p", "timestamp": "t1"},
+        {"type": "cred_spray", "endpoint": "imap://x", "payload": "p", "timestamp": "t2"},
+        {"type": "webadmin_login", "endpoint": "http://x/admin", "payload": "p", "timestamp": "t3"},
+        {
+            "type": "backup_rce",
+            "endpoint": "http://x/admin/backup",
+            "payload": "p",
+            "timestamp": "t4",
+        },
+    ]
+    pattern_id = runner._writeback_pattern(chain)
+    assert pattern_id is not None
+    return pattern_id
+
+
+class TestRecallPatterns:
+    """Deliverable A: _recall_patterns recalls surface-keyed generalized patterns."""
+
+    def test_returns_empty_on_fresh_db(self, runner: SkillOrchestrator) -> None:
+        # Never raises on an empty store, returns [].
+        assert runner._recall_patterns(ports=(2049,), tech=("nginx",)) == []
+
+    def test_recalls_saved_pattern(self, runner: SkillOrchestrator) -> None:
+        pattern_id = _seed_enigma_pattern(runner)
+        recalled = runner._recall_patterns(ports=(2049, 143, 80), tech=("nginx",))
+        ids = {p["pattern_id"] for p in recalled}
+        assert pattern_id in ids
+
+    def test_ranks_by_surface_overlap(self, runner: SkillOrchestrator) -> None:
+        # Seed a strong-overlap pattern, then a weak one, recall against the
+        # strong surface — the better-matching pattern ranks first.
+        strong = _seed_enigma_pattern(runner)
+        # A second, different-surface pattern (web-only, different tech).
+        runner._dispatch_ports = (80,)
+        runner.scanner.attack_surface = {"/": {"tech_hints": ["flask"]}}
+        weak = runner._writeback_pattern(
+            [
+                {"type": "sqli", "endpoint": "/login", "payload": "p", "timestamp": "t1"},
+                {"type": "cred_spray", "endpoint": "/m", "payload": "p", "timestamp": "t2"},
+            ]
+        )
+        assert weak is not None and weak != strong
+        recalled = runner._recall_patterns(ports=(2049, 143, 80), tech=("nginx",))
+        assert recalled[0]["pattern_id"] == strong
+
+    def test_never_raises_on_db_error(self, runner: SkillOrchestrator) -> None:
+        class _Boom:
+            def match_patterns(self, *a: Any, **k: Any) -> Any:
+                raise RuntimeError("db gone")
+
+        runner.scanner.db = _Boom()  # type: ignore[assignment]
+        assert runner._recall_patterns(ports=(80,), tech=("nginx",)) == []
+
+
+class TestRecalledPatternsInGuidance:
+    """Deliverable B: recon + exploit guidance carry recalled_patterns."""
+
+    def test_recon_populates_recalled_patterns(self, runner: SkillOrchestrator) -> None:
+        pattern_id = _seed_enigma_pattern(runner)
+        guidance = runner.get_recon_guidance()
+        ids = {p["pattern_id"] for p in guidance.recalled_patterns}
+        assert pattern_id in ids
+
+    def test_exploit_populates_recalled_patterns(self, runner: SkillOrchestrator) -> None:
+        pattern_id = _seed_enigma_pattern(runner)
+        guidance = runner.get_exploit_guidance()
+        ids = {p["pattern_id"] for p in guidance.recalled_patterns}
+        assert pattern_id in ids
+
+    def test_empty_when_no_pattern(self, runner: SkillOrchestrator) -> None:
+        assert runner.get_recon_guidance().recalled_patterns == []
+
+
+class TestRecalledPatternBlock:
+    """Deliverable C: the 'Proven attack pattern' block renders ABOVE Prior memory."""
+
+    def test_block_renders_with_sequence_above_prior_memory(
+        self, runner: SkillOrchestrator
+    ) -> None:
+        _seed_enigma_pattern(runner)
+        # Also seed a prior finding so the "Prior memory" block appears.
+        runner.scanner.db.save_finding(
+            runner.scanner.host,
+            endpoint="/old",
+            method="GET",
+            payload="x",
+            indicators=["i"],
+            details=["d"],
+            vuln_type="xss",
+        )
+        runner.scanner.reload()
+
+        guidance = runner.get_recon_guidance()
+        prompt = SkillOrchestrator._build_agent_prompt(guidance)
+
+        assert "## Proven attack pattern for this surface" in prompt
+        assert "Try this sequence FIRST" in prompt
+        # The proven technique tokens appear in the sequence.
+        for token in ("nfs_enum_exports", "cred_spray_mail_users", "webadmin_login_reuse"):
+            assert token in prompt
+        assert "generalized technique sequence from prior engagements" in prompt
+
+        # The pattern block must sit ABOVE the per-host prior-memory block.
+        assert "## Prior memory" in prompt
+        assert prompt.index("## Proven attack pattern") < prompt.index("## Prior memory")
+
+    def test_block_contains_no_secret(self, runner: SkillOrchestrator) -> None:
+        # Guard: a recalled pattern is secret-free by construction; assert it.
+        _seed_enigma_pattern(runner)
+        prompt = SkillOrchestrator._build_agent_prompt(runner.get_recon_guidance())
+        for secret in ("Enigma2024!", "support_001.enigma.htb", "shell.php", "kevin"):
+            assert secret not in prompt
+
+
+class TestRunReordersByPattern:
+    """Deliverable D: run(mode='auto') front-loads fan-out by a proven pattern."""
+
+    def _two_tracks_web_first(self) -> list[Any]:
+        # ORIGINAL order: web before nfs. A proven nfs→web pattern must flip them.
+        return [_track("web", capability="web_app"), _track("nfs", capability="nfs_export")]
+
+    def test_auto_reorders_tasks_to_follow_pattern(
+        self, runner: SkillOrchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from bugbounty_ctf import playbook
+
+        pattern_id = _seed_enigma_pattern(runner)
+        # Reset discovered surface so guidance recall keys off the run() args.
+        monkeypatch.setattr(playbook, "select", lambda ports, tech: self._two_tracks_web_first())
+
+        captured: dict[str, Any] = {}
+
+        def fake_fan_out(tasks: list[tuple[str, str]], **kwargs: Any) -> dict[str, Any]:
+            captured["tasks"] = tasks
+            return {"responses": {}, "merged": 0}
+
+        monkeypatch.setattr(runner, "fan_out", fake_fan_out)
+        monkeypatch.setattr(
+            runner, "run_with_agents", lambda **k: pytest.fail("run_with_agents called")
+        )
+
+        result = runner.run(mode="auto", ports=[2049, 143, 80], tech=["nginx"])
+
+        labels = [label for label, _ in captured["tasks"]]
+        # nfs (step idx 0) must precede web (step idx 2), reversing the input.
+        assert labels == ["nfs", "web"]
+        # Lead task carries the proven-order preamble.
+        assert "Proven order from a prior same-shaped engagement" in captured["tasks"][0][1]
+        assert result["pattern_applied"] == pattern_id
+
+    def test_auto_unchanged_without_matching_pattern(
+        self, runner: SkillOrchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from bugbounty_ctf import playbook
+
+        # No pattern seeded → degrade gracefully to original order.
+        monkeypatch.setattr(playbook, "select", lambda ports, tech: self._two_tracks_web_first())
+
+        captured: dict[str, Any] = {}
+
+        def fake_fan_out(tasks: list[tuple[str, str]], **kwargs: Any) -> dict[str, Any]:
+            captured["tasks"] = tasks
+            return {"responses": {}, "merged": 0}
+
+        monkeypatch.setattr(runner, "fan_out", fake_fan_out)
+        monkeypatch.setattr(
+            runner, "run_with_agents", lambda **k: pytest.fail("run_with_agents called")
+        )
+
+        result = runner.run(mode="auto", ports=[2049, 143, 80], tech=["nginx"])
+
+        labels = [label for label, _ in captured["tasks"]]
+        assert labels == ["web", "nfs"]  # original order, untouched
+        # No preamble injected on the lead task.
+        assert "Proven order" not in captured["tasks"][0][1]
+        assert result["pattern_applied"] is None
 
 
 class TestWritebackLessonsNoLeak:

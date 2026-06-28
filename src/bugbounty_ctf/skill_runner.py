@@ -27,6 +27,34 @@ from bugbounty_ctf.engine import SecurityScanner
 from bugbounty_ctf.knowledge import KnowledgeBase
 from bugbounty_ctf.taint import render, render_json
 
+# Minimum recalled-pattern confidence for run(mode="auto") to FRONT-LOAD it
+# (reorder fan-out tracks to follow its proven step order). Below this, the
+# surface is treated as novel and dispatch degrades to default ordering.
+PATTERN_RECALL_THRESHOLD = 0.5
+
+# Maps a playbook Track's generalized ``capability`` (a CAPABILITY_TOKEN) to the
+# pattern technique token(s) that exercise it. Used by run(mode="auto") to find
+# where a selected track sits in a recalled pattern's step sequence, so tracks
+# whose technique appears earlier in the proven chain run first. Capabilities
+# absent here simply have no pattern position (kept in original relative order).
+_CAPABILITY_TO_TECHNIQUES: dict[str, tuple[str, ...]] = {
+    "nfs_export": ("nfs_enum_exports", "nfs_uid_spoof"),
+    "imap_open": ("cred_spray_mail_users", "mailbox_secret_pivot"),
+    "smtp_open": ("cred_spray_mail_users",),
+    "webmail_vhost": ("webadmin_login_reuse",),
+    "web_app": (
+        "web_content_discovery",
+        "webadmin_login_reuse",
+        "admin_panel_backup_to_rce",
+        "file_upload_rce",
+        "sqli_dump_creds",
+        "ssti_rce",
+        "ssrf_metadata_creds",
+    ),
+    "version_banner": ("cve_exploit",),
+    "smb_open": (),
+}
+
 
 @dataclass
 class PhaseGuidance:
@@ -43,6 +71,9 @@ class PhaseGuidance:
     # Resolved hypotheses and high-confidence observations from past runs.
     prior_hypotheses: list[dict[str, Any]] = field(default_factory=list)
     prior_observations: list[dict[str, Any]] = field(default_factory=list)
+    # Generalized, surface-keyed attack patterns recalled from prior engagements
+    # (the cross-box pattern memory). Plain dicts so they render directly.
+    recalled_patterns: list[dict[str, Any]] = field(default_factory=list)
     # Shared-persistence handles so a spawned sub-agent writes its findings to
     # the same state file / DB the orchestrator reads back between phases.
     target_url: str = ""
@@ -240,6 +271,100 @@ class SkillOrchestrator:
             )
         return out
 
+    def _surface_capabilities(
+        self,
+        ports: tuple[int, ...],
+        tech: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Derive GENERALIZED surface capabilities from ports + tech (no findings).
+
+        Complements :meth:`_derive_capabilities` (which reads confirmed findings):
+        this maps the *discovered surface* — open ports and tech hints — to closed
+        capability tokens so a recall can run before anything is confirmed. Only
+        tokens in :data:`patterns.CAPABILITY_TOKENS` are emitted.
+        """
+        from bugbounty_ctf import patterns
+
+        # Port → capability for the surface signals a recall can key on.
+        port_caps: dict[int, str] = {
+            2049: "nfs_export",
+            111: "nfs_export",
+            143: "imap_open",
+            993: "imap_open",
+            110: "imap_open",
+            995: "imap_open",
+            25: "smtp_open",
+            465: "smtp_open",
+            587: "smtp_open",
+            445: "smb_open",
+            139: "smb_open",
+            80: "web_app",
+            443: "web_app",
+            8080: "web_app",
+            8000: "web_app",
+            8443: "web_app",
+            8888: "web_app",
+        }
+        caps: list[str] = []
+        for p in ports:
+            token = port_caps.get(p)
+            if token and token not in caps and token in patterns.CAPABILITY_TOKENS:
+                caps.append(token)
+        # Tech hints can name a capability directly (reuse the substring hints).
+        haystacks = [t.lower() for t in tech]
+        for needle, token in self._CAPABILITY_HINTS:
+            if token in caps:
+                continue
+            if token in patterns.CAPABILITY_TOKENS and any(needle in h for h in haystacks):
+                caps.append(token)
+        return tuple(caps)
+
+    def _recall_patterns(
+        self,
+        *,
+        ports: tuple[int, ...] | None = None,
+        tech: tuple[str, ...] | None = None,
+        capabilities: tuple[str, ...] | None = None,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Recall the top GENERALIZED attack patterns for the current surface.
+
+        Resolves the surface (ports/tech/capabilities) from args or, when absent,
+        from the dispatched surface and discovered tech, then asks the pattern
+        store for candidates and ranks them by surface overlap
+        (:func:`patterns.rank_patterns`). Returns the top ``limit`` as plain
+        dicts (via :meth:`AttackPattern.to_dict`) so they render directly into a
+        prompt. Defensive like the other ``_recall_*`` methods: any DB error
+        yields ``[]`` rather than aborting a run.
+        """
+        from bugbounty_ctf import patterns
+
+        resolved_ports = ports if ports is not None else self._dispatch_ports
+        if tech is not None:
+            resolved_tech = tuple(t.lower() for t in tech)
+        else:
+            resolved_tech = tuple(
+                str(t).lower() for t in self._format_discovered().get("tech_hints", [])
+            )
+        if capabilities is not None:
+            resolved_caps = capabilities
+        else:
+            resolved_caps = self._surface_capabilities(resolved_ports, resolved_tech)
+
+        try:
+            candidates = self.scanner.db.match_patterns(
+                resolved_ports, resolved_tech, resolved_caps
+            )
+        except Exception:
+            return []
+        ranked = patterns.rank_patterns(
+            candidates,
+            ports=resolved_ports,
+            tech=resolved_tech,
+            capabilities=resolved_caps,
+        )
+        return [p.to_dict() for p in ranked[:limit]]
+
     def get_recon_guidance(self) -> PhaseGuidance:
         self.current_phase = "recon"
         rag = self._query_rag("reconnaissance attack surface mapping web application")
@@ -256,6 +381,7 @@ class SkillOrchestrator:
             prior_memory=self._recall_prior(),
             prior_hypotheses=self._recall_hypotheses(),
             prior_observations=self._recall_observations(),
+            recalled_patterns=self._recall_patterns(),
         )
 
     def get_research_guidance(self) -> PhaseGuidance:
@@ -327,6 +453,7 @@ class SkillOrchestrator:
             rag_context=rag,
             scanner_state=self._format_state(),
             previous_findings=self.scanner.findings,
+            recalled_patterns=self._recall_patterns(),
         )
 
     def collect_results(self) -> dict[str, Any]:
@@ -500,6 +627,40 @@ class SkillOrchestrator:
 
         if guidance.scanner_state:
             lines.extend(["", "## Current scanner state", guidance.scanner_state])
+
+        # Proven, transferable playbook FIRST — above per-host prior memory — so
+        # the agent reads the generalized plan that won on a same-shaped box and
+        # tries it before re-deriving. Top 1-2 only (don't flood). Every leaf is
+        # funneled through render() (defense-in-depth: patterns are secret-free,
+        # but this is the same valve the other recall blocks use).
+        for pattern in guidance.recalled_patterns[:2]:
+            steps = pattern.get("steps", [])
+            if not isinstance(steps, list) or not steps:
+                continue
+            conf = render(f"{float(pattern.get('confidence', 0.0)):.2f}")
+            worked = render(str(pattern.get("worked", 0)))
+            applied = render(str(pattern.get("applied", pattern.get("worked", 0))))
+            caps = pattern.get("capabilities", [])
+            surface = " + ".join(render(str(c)) for c in caps) if caps else "(generalized)"
+            lines.extend(
+                [
+                    "",
+                    f"## Proven attack pattern for this surface "
+                    f"(confidence {conf}, worked {worked}/{applied})",
+                    f"Surface match: {surface}",
+                    "Try this sequence FIRST, before re-deriving from scratch:",
+                ]
+            )
+            for i, step in enumerate(steps, start=1):
+                technique = render(str(step.get("technique", "?")))
+                rationale = render(str(step.get("rationale", "")), maxlen=120)
+                lines.append(f"  {i}. {technique}  — {rationale}")
+            lines.extend(
+                [
+                    "This is a generalized technique sequence from prior engagements, NOT",
+                    "target-specific data. Adapt each step to THIS target.",
+                ]
+            )
 
         if guidance.prior_memory:
             lines.extend(["", "## Prior memory (confirmed on this host in past runs)"])
@@ -710,6 +871,96 @@ class SkillOrchestrator:
         self.save_results()
         return final
 
+    @staticmethod
+    def _track_pattern_index(capability: str, technique_order: dict[str, int]) -> int | None:
+        """Earliest index in a pattern's step order that a track's capability hits.
+
+        A track exercises one or more techniques (via :data:`_CAPABILITY_TO_TECHNIQUES`);
+        its position in the proven chain is the *min* index at which any of those
+        techniques appears in ``technique_order`` (technique → step index).
+        Returns ``None`` when the track is not referenced by the pattern at all.
+        """
+        candidates = _CAPABILITY_TO_TECHNIQUES.get(capability, ())
+        hits = [technique_order[t] for t in candidates if t in technique_order]
+        return min(hits) if hits else None
+
+    def _apply_pattern_to_tracks(
+        self,
+        tracks: list[Any],
+        *,
+        ports: tuple[int, ...],
+        tech: tuple[str, ...],
+    ) -> tuple[list[tuple[str, str]], str | None]:
+        """Front-load fan-out tasks to follow a proven pattern's step order.
+
+        Recalls the top pattern for the surface. If its confidence clears
+        :data:`PATTERN_RECALL_THRESHOLD` AND it shares surface with the selected
+        tracks (at least one track maps into the pattern's steps), tracks are
+        REORDERED so those whose capability-technique appears earlier in the
+        chain run first; unreferenced tracks keep their original relative order,
+        appended after. The lead task's instruction is prefixed with the proven,
+        secret-free step list as a short preamble.
+
+        This NEVER replaces selection: a novel surface (no pattern, low
+        confidence, or no shared surface) returns the tasks in their original
+        order with a ``None`` pattern id — today's behavior, unchanged. Returns
+        ``(tasks, pattern_id)``.
+        """
+        default = [(t.id, t.instruction) for t in tracks]
+        recalled = self._recall_patterns(ports=ports, tech=tech, limit=1)
+        if not recalled:
+            return default, None
+        pattern = recalled[0]
+        if float(pattern.get("confidence", 0.0)) < PATTERN_RECALL_THRESHOLD:
+            return default, None
+
+        steps = pattern.get("steps", [])
+        if not isinstance(steps, list) or not steps:
+            return default, None
+        technique_order: dict[str, int] = {}
+        for idx, step in enumerate(steps):
+            technique = str(step.get("technique", ""))
+            if technique and technique not in technique_order:
+                technique_order[technique] = idx
+
+        # (original_index, pattern_index|None, track) — stable sort keeps the
+        # original relative order both within a tie and among unreferenced tracks.
+        annotated = [
+            (i, self._track_pattern_index(t.capability, technique_order), t)
+            for i, t in enumerate(tracks)
+        ]
+        if not any(pidx is not None for _, pidx, _ in annotated):
+            # No selected track is referenced by the pattern → no shared surface.
+            return default, None
+
+        # Referenced tracks sort by their pattern step index; unreferenced tracks
+        # sort after all referenced ones, preserving original relative order.
+        unreferenced_rank = len(steps)
+
+        def sort_key(item: tuple[int, int | None, Any]) -> tuple[int, int]:
+            orig_i, pidx, _track = item
+            return (pidx if pidx is not None else unreferenced_rank, orig_i)
+
+        reordered = sorted(annotated, key=sort_key)
+        tasks = [(t.id, t.instruction) for _, _, t in reordered]
+
+        # Prepend the proven step order to the lead task as a short preamble.
+        preamble_steps = "; ".join(
+            f"{render(str(s.get('technique', '?')))} — "
+            f"{render(str(s.get('rationale', '')), maxlen=100)}"
+            for s in steps
+        )
+        if tasks:
+            lead_label, lead_instr = tasks[0]
+            preamble = (
+                "Proven order from a prior same-shaped engagement (adapt to THIS "
+                f"target): {preamble_steps}\n\n"
+            )
+            tasks[0] = (lead_label, preamble + lead_instr)
+
+        pid = pattern.get("pattern_id")
+        return tasks, (str(pid) if pid else None)
+
     def run(
         self,
         *,
@@ -759,8 +1010,12 @@ class SkillOrchestrator:
             if ports is None and tech is None:
                 raise ValueError("mode='fanout' requires ports and/or tech")
             tracks = _parallel_tracks()
-            result = self.fan_out([(t.id, t.instruction) for t in tracks])
+            tasks, pattern_id = self._apply_pattern_to_tracks(
+                tracks, ports=self._dispatch_ports, tech=self._dispatch_tech
+            )
+            result = self.fan_out(tasks)
             result["selected_tracks"] = [t.id for t in tracks]
+            result["pattern_applied"] = pattern_id
             return result
 
         if mode == "auto":
@@ -768,8 +1023,12 @@ class SkillOrchestrator:
                 return self.run_with_agents(timeout_per_phase=timeout_per_phase, verify=verify)
             tracks = _parallel_tracks()
             if len(tracks) >= 2:
-                result = self.fan_out([(t.id, t.instruction) for t in tracks])
+                tasks, pattern_id = self._apply_pattern_to_tracks(
+                    tracks, ports=self._dispatch_ports, tech=self._dispatch_tech
+                )
+                result = self.fan_out(tasks)
                 result["selected_tracks"] = [t.id for t in tracks]
+                result["pattern_applied"] = pattern_id
                 return result
             return self.run_with_agents(timeout_per_phase=timeout_per_phase, verify=verify)
 
