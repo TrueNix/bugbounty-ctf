@@ -46,14 +46,12 @@ Issues = "https://github.com/TrueNix/bugbounty-ctf/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bugbounty_ctf"]
-# Ship the bundled SecLists payload wordlists as package data so they survive
-# `pip install` and the Hermes skill copy (WordlistLoader resolves them relative
-# to the package directory).
+# Ship the bundled SecLists payload wordlists and CVE/template data as package
+# data so they survive `pip install` and the Hermes skill copy (resolved
+# relative to the package directory). These files are git-tracked and live
+# inside the package, so `artifacts` includes them — a `force-include` table
+# would re-add them and break the wheel build with a duplicate-path error.
 artifacts = ["src/bugbounty_ctf/wordlists/*.txt", "src/bugbounty_ctf/data/*.json"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"src/bugbounty_ctf/wordlists" = "bugbounty_ctf/wordlists"
-"src/bugbounty_ctf/data" = "bugbounty_ctf/data"
 
 [tool.hatch.build.targets.sdist]
 include = ["src", "tests", "references", "templates", "SKILL.md", "README.md"]
