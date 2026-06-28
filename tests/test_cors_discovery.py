@@ -166,6 +166,26 @@ class TestContentDiscovery:
         # Budget must stop the loop well before all 1000 paths are probed.
         assert len(probed) < 1000
 
+    def test_concurrent_budget_returns_promptly(self) -> None:
+        # Regression: the concurrent path used `with ThreadPoolExecutor` whose
+        # exit calls shutdown(wait=True), so it blocked until ALL submitted
+        # futures drained — making max_seconds cosmetic. The call must return
+        # near the budget, not after every probe completes.
+        sc = _scanner()
+
+        def slow(method: str, url: str, **kwargs: Any) -> _Resp:
+            time.sleep(0.5)
+            return _Resp(404)
+
+        sc._make_request = slow  # type: ignore[method-assign]
+        words = [f"w{i}" for i in range(400)]  # 400 * 0.5s / 8 ≈ 25s if it blocked
+        start = time.monotonic()
+        discover_content(
+            "http://target.test/", scanner=sc, wordlist=words, workers=8, limit=-1, max_seconds=0.5
+        )
+        elapsed = time.monotonic() - start
+        assert elapsed < 5.0, f"budget not enforced on concurrent path: {elapsed:.1f}s"
+
     def test_extensions_are_appended(self) -> None:
         sc = _scanner()
         seen: list[str] = []

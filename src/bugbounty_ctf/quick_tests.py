@@ -594,20 +594,25 @@ def discover_content(
     else:
         from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        # NB: do NOT rely on the `with` context-exit — it calls shutdown(wait=True),
+        # which blocks until EVERY submitted future drains, making max_seconds
+        # cosmetic (a -1/full sweep would still run for minutes). We shut down
+        # explicitly with cancel_futures=True on the deadline so the budget is real.
+        pool = ThreadPoolExecutor(max_workers=workers)
+        try:
             futures = {pool.submit(probe, path): path for path in candidates}
-            try:
-                remaining = (deadline - time.monotonic()) if deadline is not None else None
-                for fut in as_completed(futures, timeout=remaining):
-                    probed += 1
-                    item = fut.result()
-                    if item is not None:
-                        raw.append(item)
-            except TimeoutError:
-                print(
-                    f"[*] discovery stopped after {max_seconds}s "
-                    f"({probed}/{len(candidates)} probed)"
-                )
+            remaining = (deadline - time.monotonic()) if deadline is not None else None
+            for fut in as_completed(futures, timeout=remaining):
+                probed += 1
+                item = fut.result()
+                if item is not None:
+                    raw.append(item)
+        except TimeoutError:
+            print(f"[*] discovery stopped after {max_seconds}s ({probed}/{len(candidates)} probed)")
+        finally:
+            # Cancel not-yet-started probes and return without waiting for the
+            # ≤workers in-flight ones (each bounded by the request timeout).
+            pool.shutdown(wait=False, cancel_futures=True)
 
     signature_counts: dict[tuple[int, int], int] = {}
     for item in raw:
