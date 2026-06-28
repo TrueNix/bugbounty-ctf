@@ -14,6 +14,7 @@ from bugbounty_ctf.patterns import (
     TechniqueStep,
     beta_confidence,
     compute_id,
+    decayed_confidence,
     jaccard,
     rank_patterns,
 )
@@ -352,3 +353,74 @@ def test_prune_patterns_removes_proven_bad_keeps_good() -> None:
     assert good.pattern_id in ids
     assert bad.pattern_id not in ids
     db.close()
+
+
+# ----------------------------------------------------------- bump_pattern_stats
+def test_bump_pattern_stats_worked_raises_confidence() -> None:
+    db = ScannerDB(":memory:")
+    base = _build_pattern()
+    db.save_pattern(base)  # applied/worked/failed all 0 → confidence 0.5
+
+    db.bump_pattern_stats(base.pattern_id, applied=1, worked=1, now="2026-03-03T00:00:00")
+    m = db.get_pattern(base.pattern_id)
+    assert m is not None
+    assert (m.applied, m.worked, m.failed) == (1, 1, 0)
+    assert m.confidence == beta_confidence(1, 0)
+    assert m.confidence > 0.5  # a win pushes confidence up
+    assert m.last_seen == "2026-03-03T00:00:00"
+    db.close()
+
+
+def test_bump_pattern_stats_failed_lowers_confidence() -> None:
+    db = ScannerDB(":memory:")
+    base = _build_pattern()
+    db.save_pattern(base)
+
+    db.bump_pattern_stats(base.pattern_id, applied=1, failed=1)
+    m = db.get_pattern(base.pattern_id)
+    assert m is not None
+    assert (m.applied, m.worked, m.failed) == (1, 0, 1)
+    assert m.confidence == beta_confidence(0, 1)
+    assert m.confidence < 0.5  # a loss drags confidence down
+    db.close()
+
+
+def test_bump_pattern_stats_noop_on_unknown_id() -> None:
+    db = ScannerDB(":memory:")
+    # No exception, no row created.
+    db.bump_pattern_stats("does-not-exist", applied=1, worked=1)
+    assert db.get_pattern("does-not-exist") is None
+    db.close()
+
+
+def test_bump_pattern_stats_without_now_keeps_last_seen() -> None:
+    db = ScannerDB(":memory:")
+    base = _build_pattern(now="2026-01-01T00:00:00")
+    db.save_pattern(base)
+
+    db.bump_pattern_stats(base.pattern_id, applied=1, worked=1)  # no now=
+    m = db.get_pattern(base.pattern_id)
+    assert m is not None
+    assert m.last_seen == "2026-01-01T00:00:00"
+    db.close()
+
+
+# ---------------------------------------------------------- decayed_confidence
+def test_decayed_confidence_same_day_unchanged() -> None:
+    assert decayed_confidence(0.8, "2026-06-01T00:00:00", "2026-06-01T12:00:00") == 0.8
+
+
+def test_decayed_confidence_six_months() -> None:
+    # ~6 months later (180 days ≈ 6.0 months) → confidence * 0.95 ** 6.
+    decayed = decayed_confidence(0.8, "2026-01-01T00:00:00", "2026-06-30T00:00:00")
+    assert round(decayed, 6) == round(0.8 * (0.95**6), 6)
+    assert decayed < 0.8  # stale patterns sink
+
+
+def test_decayed_confidence_future_last_seen_clamped() -> None:
+    # last_seen AFTER now → no boost, returns confidence unchanged.
+    assert decayed_confidence(0.8, "2026-12-01T00:00:00", "2026-06-01T00:00:00") == 0.8
+
+
+def test_decayed_confidence_malformed_unchanged() -> None:
+    assert decayed_confidence(0.8, "not-a-date", "2026-06-01T00:00:00") == 0.8

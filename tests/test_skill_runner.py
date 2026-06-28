@@ -928,3 +928,176 @@ class TestWritebackLessonsNoLeak:
         for body in bodies:
             assert "Enigma2024!" not in body
             assert "support_001.enigma.htb" not in body
+
+
+class TestScorePatternFeedback:
+    """Phase 4 / Deliverable C: surfaced patterns are scored by step overlap.
+
+    The seeded pattern's 4 steps are nfs_enum_exports → cred_spray_mail_users →
+    webadmin_login_reuse → admin_panel_backup_to_rce. worked when the run
+    achieves >= 50% of them (>= 2 of 4), failed otherwise.
+    """
+
+    def _stored(self, runner: SkillOrchestrator, pid: str) -> Any:
+        return runner.scanner.db.get_pattern(pid)
+
+    def test_high_overlap_marks_worked_and_raises_confidence(
+        self, runner: SkillOrchestrator
+    ) -> None:
+        pid = _seed_enigma_pattern(runner)
+        before = self._stored(runner, pid).confidence
+        runner._surfaced_pattern_ids = {pid}
+
+        # 3 of 4 steps achieved (nfs, cred_spray, webadmin) → overlap 0.75 >= 0.5.
+        confirmed = [
+            {"type": "nfs", "endpoint": "/x", "payload": "p", "timestamp": "t1"},
+            {"type": "cred_spray", "endpoint": "imap://x", "payload": "p", "timestamp": "t2"},
+            {
+                "type": "webadmin_login",
+                "endpoint": "http://x/admin",
+                "payload": "p",
+                "timestamp": "t3",
+            },
+        ]
+        feedback = runner._score_pattern_feedback(confirmed, now="2026-04-04T00:00:00")
+
+        assert feedback[pid] == "worked"
+        after = self._stored(runner, pid)
+        assert after.worked == 1
+        assert after.failed == 0
+        assert after.applied == 1
+        assert after.confidence > before
+        assert after.last_seen == "2026-04-04T00:00:00"
+        # Surfaced set cleared after scoring.
+        assert runner._surfaced_pattern_ids == set()
+
+    def test_low_overlap_marks_failed_and_lowers_confidence(
+        self, runner: SkillOrchestrator
+    ) -> None:
+        pid = _seed_enigma_pattern(runner)
+        before = self._stored(runner, pid).confidence
+        runner._surfaced_pattern_ids = {pid}
+
+        # Only 1 of 4 steps achieved (nfs) → overlap 0.25 < 0.5.
+        confirmed = [
+            {"type": "nfs", "endpoint": "/x", "payload": "p", "timestamp": "t1"},
+        ]
+        feedback = runner._score_pattern_feedback(confirmed, now="2026-04-04T00:00:00")
+
+        assert feedback[pid] == "failed"
+        after = self._stored(runner, pid)
+        assert after.failed == 1
+        assert after.worked == 0
+        assert after.applied == 1
+        assert after.confidence < before
+        assert runner._surfaced_pattern_ids == set()
+
+    def test_no_surfaced_patterns_is_noop(self, runner: SkillOrchestrator) -> None:
+        # Nothing surfaced → empty feedback, no error.
+        assert runner._score_pattern_feedback([], now="2026-04-04T00:00:00") == {}
+
+    def test_missing_pattern_id_skipped(self, runner: SkillOrchestrator) -> None:
+        # A surfaced id no longer in the store is skipped, set still cleared.
+        runner._surfaced_pattern_ids = {"ghost"}
+        feedback = runner._score_pattern_feedback([], now="2026-04-04T00:00:00")
+        assert feedback == {}
+        assert runner._surfaced_pattern_ids == set()
+
+
+class TestRecallPopulatesSurfacedIds:
+    """Deliverable A: _recall_patterns records which patterns it surfaced."""
+
+    def test_recall_records_surfaced_ids(self, runner: SkillOrchestrator) -> None:
+        pid = _seed_enigma_pattern(runner)
+        runner._surfaced_pattern_ids.clear()
+        recalled = runner._recall_patterns(ports=(2049, 143, 80), tech=("nginx",))
+        assert {p["pattern_id"] for p in recalled} == runner._surfaced_pattern_ids
+        assert pid in runner._surfaced_pattern_ids
+
+
+class TestRecallDecayRanking:
+    """Deliverable D: a stale high-confidence pattern ranks below a fresh one."""
+
+    def test_old_pattern_sinks_below_fresh_after_decay(self, runner: SkillOrchestrator) -> None:
+        from datetime import datetime
+
+        from bugbounty_ctf.patterns import PatternGuard, TechniqueStep
+
+        db = runner.scanner.db
+        now = datetime.now().isoformat()
+
+        # Both patterns share the SAME surface (so surface-Jaccard is equal and
+        # confidence/decay is the tiebreaker) but distinct step sequences → ids.
+        def _mk(steps: tuple[TechniqueStep, ...], last_seen: str, conf: float) -> str:
+            p = PatternGuard.build(
+                ports=(2049, 143, 80),
+                tech=("nginx",),
+                capabilities=("nfs_export",),
+                steps=steps,
+                outcome="rce",
+                provenance=("run",),
+                now="2020-01-01T00:00:00",
+            )
+            assert p is not None
+            from dataclasses import replace
+
+            p = replace(p, confidence=conf, last_seen=last_seen)
+            db.save_pattern(p)
+            return p.pattern_id
+
+        old_steps = (
+            TechniqueStep("nfs_enum_exports", "r", ""),
+            TechniqueStep("sqli_dump_creds", "r", ""),
+        )
+        fresh_steps = (
+            TechniqueStep("nfs_enum_exports", "r", ""),
+            TechniqueStep("ssti_rce", "r", ""),
+        )
+        # Old pattern: HIGHER stored confidence but last_seen years ago.
+        old_id = _mk(old_steps, "2020-01-01T00:00:00", 0.90)
+        # Fresh pattern: lower stored confidence but seen just now.
+        fresh_id = _mk(fresh_steps, now, 0.70)
+
+        recalled = runner._recall_patterns(ports=(2049, 143, 80), tech=("nginx",))
+        order = [p["pattern_id"] for p in recalled]
+        # After decay, the fresh pattern outranks the stale one.
+        assert order.index(fresh_id) < order.index(old_id)
+        # Returned dicts keep the TRUE stored confidence (decay is rank-only).
+        fresh = next(p for p in recalled if p["pattern_id"] == fresh_id)
+        old = next(p for p in recalled if p["pattern_id"] == old_id)
+        assert fresh["confidence"] == 0.70
+        assert old["confidence"] == 0.90
+
+
+class TestFanOutFeedbackLoop:
+    """End-to-end (monkeypatched): fan_out captures, scores, and reports feedback."""
+
+    def test_fan_out_scores_recalled_pattern(
+        self, runner: SkillOrchestrator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pid = _seed_enigma_pattern(runner)
+        before = runner.scanner.db.get_pattern(pid).confidence
+        # Simulate that this pattern was surfaced to the agent this run.
+        runner._surfaced_pattern_ids = {pid}
+
+        # Each track reports a finding whose technique appears in the pattern,
+        # so the run achieves >= 50% of the proven steps → worked.
+        per_label = {
+            "nfs": '<FINDINGS>[{"type":"nfs","endpoint":"/srv","payload":""}]</FINDINGS>',
+            "mail": '<FINDINGS>[{"type":"cred_spray","endpoint":"imap","payload":""}]</FINDINGS>',
+            "web": '<FINDINGS>[{"type":"webadmin_login","endpoint":"/admin","payload":""}]</FINDINGS>',
+        }
+
+        def fake_run(prompt: str, *, timeout: int, label: str = "agent") -> str:
+            return per_label[label]
+
+        monkeypatch.setattr(runner, "_run_hermes", fake_run)
+        result = runner.fan_out([("nfs", "enum"), ("mail", "spray"), ("web", "login")])
+
+        assert "pattern_feedback" in result
+        assert result["pattern_feedback"].get(pid) == "worked"
+        after = runner.scanner.db.get_pattern(pid)
+        assert after.worked >= 1
+        assert after.confidence > before
+        # Surfaced set cleared by the feedback pass.
+        assert runner._surfaced_pattern_ids == set()

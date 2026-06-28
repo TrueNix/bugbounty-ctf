@@ -843,6 +843,90 @@ class ScannerDB:
             )
         return results
 
+    def get_pattern(self, pattern_id: str) -> AttackPattern | None:
+        """Fetch one stored pattern by id, or ``None`` if not present.
+
+        Reconstructs an :class:`AttackPattern` from the row exactly as
+        :meth:`match_patterns` does. Returns ``None`` for a missing id or a row
+        whose JSON columns fail to parse (defensive, like the recall path).
+        """
+        from bugbounty_ctf.patterns import AttackPattern as _AttackPattern
+
+        row = self.conn.execute(
+            "SELECT * FROM patterns WHERE pattern_id = ?",
+            (pattern_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            trigger = json.loads(row["trigger_json"] or "{}")
+            steps = json.loads(row["steps_json"] or "[]")
+            provenance = json.loads(row["provenance_json"] or "[]")
+        except (json.JSONDecodeError, ValueError):
+            return None
+        return _AttackPattern.from_dict(
+            {
+                "pattern_id": row["pattern_id"],
+                "ports": trigger.get("ports", []),
+                "tech": trigger.get("tech", []),
+                "capabilities": trigger.get("capabilities", []),
+                "steps": steps,
+                "outcome": row["outcome"],
+                "provenance": provenance,
+                "confidence": row["confidence"],
+                "applied": row["applied"],
+                "worked": row["worked"],
+                "failed": row["failed"],
+                "created_at": row["created_at"],
+                "last_seen": row["last_seen"],
+            }
+        )
+
+    def bump_pattern_stats(
+        self,
+        pattern_id: str,
+        *,
+        applied: int = 0,
+        worked: int = 0,
+        failed: int = 0,
+        now: str | None = None,
+    ) -> None:
+        """Add deltas to a pattern's applied/worked/failed and recompute confidence.
+
+        The feedback half of the pattern-memory loop: a recalled pattern that was
+        surfaced this run is scored (see SkillOrchestrator._score_pattern_feedback)
+        and its counts nudged here. ``confidence`` is recomputed from the merged
+        worked/failed via :func:`patterns.beta_confidence` so it self-corrects;
+        ``last_seen`` refreshes only when ``now`` is given. No-op if ``pattern_id``
+        is not present. ``beta_confidence`` is imported lazily to keep
+        engine↔patterns acyclic (mirrors :meth:`save_pattern`).
+        """
+        from bugbounty_ctf.patterns import beta_confidence
+
+        existing = self.conn.execute(
+            "SELECT applied, worked, failed, last_seen FROM patterns WHERE pattern_id = ?",
+            (pattern_id,),
+        ).fetchone()
+        if existing is None:
+            return
+        new_applied = existing["applied"] + applied
+        new_worked = existing["worked"] + worked
+        new_failed = existing["failed"] + failed
+        new_last_seen = now if now is not None else existing["last_seen"]
+        self.conn.execute(
+            """UPDATE patterns SET applied = ?, worked = ?, failed = ?,
+               confidence = ?, last_seen = ? WHERE pattern_id = ?""",
+            (
+                new_applied,
+                new_worked,
+                new_failed,
+                beta_confidence(new_worked, new_failed),
+                new_last_seen,
+                pattern_id,
+            ),
+        )
+        self.conn.commit()
+
     def prune_patterns(self, *, min_confidence: float = 0.15, min_applied: int = 5) -> int:
         """Delete patterns that have been tried enough yet keep failing.
 

@@ -261,6 +261,36 @@ def jaccard(a: Iterable[object], b: Iterable[object]) -> float:
     return len(set_a & set_b) / len(union)
 
 
+def _months_between(start: str, end: str) -> float:
+    """Approximate months between two ISO timestamps as ``days / 30.0``.
+
+    Pure and clock-free — both ends are passed in. A malformed timestamp or an
+    ``end`` earlier than ``start`` clamps to ``0.0`` (no decay), so a future
+    ``last_seen`` never *boosts* confidence.
+    """
+    from datetime import datetime
+
+    try:
+        delta_days = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days
+    except (ValueError, TypeError):
+        return 0.0
+    if delta_days <= 0:
+        return 0.0
+    return delta_days / 30.0
+
+
+def decayed_confidence(confidence: float, last_seen: str, now: str) -> float:
+    """Time-decayed confidence: ``confidence * 0.95 ** months_between(last_seen, now)``.
+
+    Pure — ``now`` is passed in, never read from the clock. A stale pattern
+    (large gap between ``last_seen`` and ``now``) sinks below a fresher one of
+    equal stored confidence, so recall ranking favours recently-proven chains.
+    Same-day → unchanged; a malformed or future ``last_seen`` → unchanged
+    (no decay, no boost — see :func:`_months_between`).
+    """
+    return confidence * float(0.95 ** _months_between(last_seen, now))
+
+
 def beta_confidence(worked: int, failed: int) -> float:
     """Laplace/Beta-smoothed success rate: ``(worked + 1) / (worked + failed + 2)``.
 

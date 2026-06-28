@@ -14,12 +14,13 @@ lets each sub-agent decide what to test based on what it found.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
@@ -112,6 +113,10 @@ class SkillOrchestrator:
         # :meth:`run` when ports/tech are provided; empty otherwise.
         self._dispatch_ports: tuple[int, ...] = ()
         self._dispatch_tech: tuple[str, ...] = ()
+        # Pattern ids surfaced to the agent / used to reorder dispatch this run.
+        # _recall_patterns populates it; _score_pattern_feedback scores them
+        # against what the run actually achieved, then clears it (Deliverable A).
+        self._surfaced_pattern_ids: set[str] = set()
 
     def _query_rag(self, query: str, limit: int = 5) -> str:
         results = self.kb.search(query, limit=limit)
@@ -357,13 +362,34 @@ class SkillOrchestrator:
             )
         except Exception:
             return []
-        ranked = patterns.rank_patterns(
-            candidates,
+
+        # Time-decay each candidate's confidence BEFORE ranking so stale
+        # patterns sink (Deliverable D). The decay is applied to a COPY used
+        # only for ranking/threshold — the returned dicts keep the true stored
+        # confidence (decay is a recall concern, not a persisted one).
+        now = datetime.now().isoformat()
+        decayed = [
+            replace(
+                c,
+                confidence=patterns.decayed_confidence(c.confidence, c.last_seen, now),
+            )
+            for c in candidates
+        ]
+        ranked_decayed = patterns.rank_patterns(
+            decayed,
             ports=resolved_ports,
             tech=resolved_tech,
             capabilities=resolved_caps,
         )
-        return [p.to_dict() for p in ranked[:limit]]
+        # Map back to the originals (true stored confidence) by id, order kept.
+        by_id = {c.pattern_id: c for c in candidates}
+        ranked = [by_id[d.pattern_id] for d in ranked_decayed if d.pattern_id in by_id]
+
+        top = ranked[:limit]
+        # Attribution: remember which patterns influenced THIS run so the
+        # feedback pass can score them (Deliverable A).
+        self._surfaced_pattern_ids.update(p.pattern_id for p in top)
+        return [p.to_dict() for p in top]
 
     def get_recon_guidance(self) -> PhaseGuidance:
         self.current_phase = "recon"
@@ -867,6 +893,15 @@ class SkillOrchestrator:
         # Capture: synthesize a generalized, surface-keyed pattern from the
         # solved chain so a future run on a same-shaped box can recall it.
         final["pattern_captured"] = self._writeback_pattern(confirmed)
+        # Feedback: score the patterns this run was shown against what it
+        # actually achieved, so their confidence self-corrects. Runs AFTER
+        # capture so it reads post-capture state (Deliverable C).
+        final["pattern_feedback"] = self._score_pattern_feedback(
+            confirmed, now=datetime.now().isoformat()
+        )
+        # Retention: drop patterns that have been tried enough yet keep failing.
+        with contextlib.suppress(Exception):
+            self.scanner.db.prune_patterns()
 
         self.save_results()
         return final
@@ -1135,11 +1170,18 @@ class SkillOrchestrator:
         confirmed = list(self.scanner.findings)
         lessons = self._writeback_lessons(confirmed)
         pattern_id = self._writeback_pattern(confirmed)
+        # Feedback: score the patterns this run was shown against what it
+        # achieved (AFTER capture, so post-capture state is read). Then prune
+        # patterns that have been tried enough yet keep failing (Deliverables C/E).
+        pattern_feedback = self._score_pattern_feedback(confirmed, now=datetime.now().isoformat())
+        with contextlib.suppress(Exception):
+            self.scanner.db.prune_patterns()
         return {
             "responses": responses,
             "merged": merged,
             "lessons_written": lessons,
             "pattern_captured": pattern_id,
+            "pattern_feedback": pattern_feedback,
         }
 
     def _writeback_lessons(self, findings: list[dict[str, Any]]) -> int:
@@ -1318,6 +1360,71 @@ class SkillOrchestrator:
         self.scanner.db.save_pattern(pattern)
         print(f"[memory] Captured pattern {pattern.pattern_id[:12]} ({outcome})")
         return pattern.pattern_id
+
+    def _achieved_techniques(self, confirmed: list[dict[str, Any]]) -> set[str]:
+        """Map confirmed findings' type/source → generalized technique tokens.
+
+        The run's ``achieved`` technique-set: each finding's ``type``/``vuln_type``
+        (then ``source``) is looked up in :data:`patterns.VULN_TO_TECHNIQUE`;
+        unmapped findings contribute nothing. This is the same vocabulary the
+        capture path uses, so scoring compares like with like.
+        """
+        from bugbounty_ctf import patterns
+
+        achieved: set[str] = set()
+        for f in confirmed:
+            key = str(f.get("type") or f.get("vuln_type") or "").lower()
+            technique = patterns.VULN_TO_TECHNIQUE.get(key)
+            if technique is None:
+                technique = patterns.VULN_TO_TECHNIQUE.get(str(f.get("source") or "").lower())
+            if technique is not None:
+                achieved.add(technique)
+        return achieved
+
+    def _score_pattern_feedback(
+        self, confirmed: list[dict[str, Any]], *, now: str
+    ) -> dict[str, str]:
+        """Score each surfaced pattern on whether it actually helped this run.
+
+        The feedback half of the pattern-memory loop (Deliverable C). For every
+        pattern recalled this run (``self._surfaced_pattern_ids``), compute how
+        much of its proven step sequence the run actually ACHIEVED::
+
+            overlap = |{pattern step techniques} ∩ achieved| / max(1, num_steps)
+
+        where ``achieved`` is the run's confirmed findings mapped to technique
+        tokens (:meth:`_achieved_techniques`). The pattern was surfaced, so it
+        counts as applied; it ``worked`` when overlap ≥ 0.5 and ``failed``
+        otherwise. :meth:`ScannerDB.bump_pattern_stats` nudges the counts and
+        recomputes confidence, so it self-corrects over time. Returns a small
+        ``{pattern_id: "worked"|"failed"}`` map for the run summary.
+
+        Always clears ``self._surfaced_pattern_ids`` and is fully defensive —
+        feedback must never break a run.
+        """
+        feedback: dict[str, str] = {}
+        try:
+            achieved = self._achieved_techniques(confirmed)
+            for pid in self._surfaced_pattern_ids:
+                pattern = self.scanner.db.get_pattern(pid)
+                if pattern is None:
+                    continue
+                step_techniques = {s.technique for s in pattern.steps}
+                overlap = len(step_techniques & achieved) / max(1, len(pattern.steps))
+                worked = overlap >= 0.5
+                self.scanner.db.bump_pattern_stats(
+                    pid,
+                    applied=1,
+                    worked=1 if worked else 0,
+                    failed=0 if worked else 1,
+                    now=now,
+                )
+                feedback[pid] = "worked" if worked else "failed"
+        except Exception:
+            pass
+        finally:
+            self._surfaced_pattern_ids.clear()
+        return feedback
 
     @staticmethod
     def _build_verify_prompt(finding: dict[str, Any], target_url: str) -> str:
