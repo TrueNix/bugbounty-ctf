@@ -60,6 +60,8 @@ from bugbounty_ctf.flag_hunter import FlagHunter, hunt_flags
 from bugbounty_ctf.forensics import ForensicsToolkit
 from bugbounty_ctf.hypothesis import Hypothesis, HypothesisEngine
 from bugbounty_ctf.knowledge import KnowledgeBase
+from bugbounty_ctf.mail_enum import MailEnumerator, extract_secrets
+from bugbounty_ctf.nfs_enum import NFSEnumerator, NFSExport
 from bugbounty_ctf.oast import (
     OASTServer,
     test_blind_rce,
@@ -109,6 +111,9 @@ __all__ = [
     "Hypothesis",
     "HypothesisEngine",
     "KnowledgeBase",
+    "MailEnumerator",
+    "NFSEnumerator",
+    "NFSExport",
     "OASTServer",
     "OSINTToolkit",
     "Observation",
@@ -145,6 +150,7 @@ __all__ = [
     "discover_content",
     "enumerate_aws_metadata",
     "exploit_aws_credentials",
+    "extract_secrets",
     "find_ssrf_endpoints",
     "forge_jwt_alg_none",
     "forge_jwt_hs256",
