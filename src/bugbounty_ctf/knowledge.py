@@ -175,15 +175,19 @@ class KnowledgeBase:
         self.reindex()
 
     LESSON_PREFIX = "learned::"
+    INGESTED_PREFIX = "ingested::"
 
     def reindex(self) -> int:
         """Reindex all reference docs. Returns number of sections indexed.
 
-        Learned lessons (filename prefixed ``learned::``) are preserved — they
-        are the toolkit's write-back memory of what actually worked on past
-        targets, not part of the static reference corpus.
+        Learned lessons and ingested references are preserved — they are the
+        toolkit's write-back memory and pull-based public-reference corpus, not
+        part of the static hand-curated reference directory.
         """
-        self.conn.execute("DELETE FROM docs WHERE filename NOT LIKE ?", (f"{self.LESSON_PREFIX}%",))
+        self.conn.execute(
+            "DELETE FROM docs WHERE filename NOT LIKE ? AND filename NOT LIKE ?",
+            (f"{self.LESSON_PREFIX}%", f"{self.INGESTED_PREFIX}%"),
+        )
         # Re-inserted docs get fresh ids; drop cached vectors for lazy recompute.
         self.conn.execute("DELETE FROM doc_vectors")
         self.conn.commit()
@@ -434,6 +438,38 @@ class KnowledgeBase:
         self.conn.commit()
         return True
 
+    @staticmethod
+    def _namespace_segment(value: str) -> str:
+        segment = re.sub(r"[^a-z0-9._-]+", "-", value.lower()).strip("-._")
+        return segment or "unknown"
+
+    def add_reference(
+        self,
+        source: str,
+        title: str,
+        body: str,
+        *,
+        tags: str = "",
+        key: str = "",
+        retention_cap: int | None = None,
+    ) -> bool:
+        source_key = self._namespace_segment(source)
+        entry_key = self._namespace_segment(key or title)
+        fname = f"{self.INGESTED_PREFIX}{source_key}::{entry_key}"
+        exists = self.conn.execute(
+            "SELECT 1 FROM docs WHERE filename = ? AND section = ? AND content = ? LIMIT 1",
+            (fname, title, body),
+        ).fetchone()
+        if exists is not None:
+            return False
+        self.conn.execute(
+            "INSERT INTO docs (filename, section, content, tags, indexed_at) VALUES (?, ?, ?, ?, ?)",
+            (fname, title, body, tags, datetime.now().isoformat()),
+        )
+        self._prune_references(retention_cap)
+        self.conn.commit()
+        return True
+
     def list_lessons(self) -> list[dict[str, str]]:
         """Return all learned lessons (write-back memory), most recent first."""
         rows = self.conn.execute(
@@ -442,6 +478,44 @@ class KnowledgeBase:
             (f"{self.LESSON_PREFIX}%",),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def list_references(self, limit: int | None = None) -> list[dict[str, str]]:
+        params: tuple[str] | tuple[str, int]
+        query = (
+            "SELECT filename, section, content, tags FROM docs "
+            "WHERE filename LIKE ? ORDER BY indexed_at DESC"
+        )
+        if limit is None:
+            params = (f"{self.INGESTED_PREFIX}%",)
+        else:
+            query = f"{query} LIMIT ?"
+            params = (f"{self.INGESTED_PREFIX}%", limit)
+        rows = self.conn.execute(query, params).fetchall()
+        return [
+            {
+                "filename": str(row["filename"]),
+                "section": str(row["section"]),
+                "content": str(row["content"]),
+                "tags": str(row["tags"]),
+            }
+            for row in rows
+        ]
+
+    def _prune_references(self, retention_cap: int | None) -> None:
+        if retention_cap is None or retention_cap < 1:
+            return
+        self.conn.execute(
+            """
+            DELETE FROM docs
+            WHERE id IN (
+                SELECT id FROM docs
+                WHERE filename LIKE ?
+                ORDER BY indexed_at DESC, id DESC
+                LIMIT -1 OFFSET ?
+            )
+            """,
+            (f"{self.INGESTED_PREFIX}%", retention_cap),
+        )
 
     def close(self) -> None:
         if self._conn is not None:
