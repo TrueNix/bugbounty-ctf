@@ -1004,12 +1004,20 @@ class SkillOrchestrator:
         tech: Iterable[str] | None = None,
         timeout_per_phase: int = 120,
         verify: bool = True,
+        autodetect: bool = True,
     ) -> dict[str, Any]:
         """Autonomous entry point — dispatch to fan-out or the headless flow.
 
         This is the single autonomous orchestration entry. It does NOT
         reimplement any logic; it selects a strategy and delegates to the
         existing :meth:`fan_out` and :meth:`run_with_agents` methods.
+
+        When ``ports`` and ``tech`` are both ``None`` and ``autodetect=True``
+        (the default), the method automatically runs :func:`~bugbounty_ctf.recon.detect_surface`
+        against the orchestrator's target host to produce a :class:`~bugbounty_ctf.recon.Surface`,
+        then uses its ``open_ports`` and ``tech`` as if the caller had passed them
+        explicitly.  Pass ``autodetect=False`` to skip this step (e.g. when you
+        already know the target has no reachable ports from the agent host).
 
         Modes:
 
@@ -1026,6 +1034,21 @@ class SkillOrchestrator:
         running agent) is unaffected — that remains the agent-owned loop.
         """
         from bugbounty_ctf import playbook
+
+        # Auto-detect surface when no ports/tech given and we know the target.
+        if ports is None and tech is None and autodetect and self.target_url:
+            try:
+                from bugbounty_ctf.recon import detect_surface
+                host = self.target_url.split("://", 1)[-1].split("/")[0].rsplit(":", 1)[0]
+                if host:
+                    surface = detect_surface(host)
+                    auto_ports, auto_tech = surface.for_run()
+                    if auto_ports or auto_tech:
+                        ports = auto_ports
+                        tech = auto_tech
+                        print(f"[recon] auto-detected: ports={auto_ports}, tech={auto_tech}")
+            except Exception as exc:
+                print(f"[recon] surface autodetect failed ({exc}), proceeding without")
 
         # Remember the surface this run dispatched on so a captured pattern's
         # trigger reflects the ports/tech it actually ran against (generalized).

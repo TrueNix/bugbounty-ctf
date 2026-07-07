@@ -86,6 +86,13 @@ from bugbounty_ctf.quick_tests import (
     test_ssrf,
     test_ssti,
 )
+from bugbounty_ctf.recon import (
+    ServiceBanner,
+    Surface,
+    detect_surface,
+    list_dead_ends,
+    record_dead_end,
+)
 from bugbounty_ctf.reverse import ReverseToolkit
 from bugbounty_ctf.scope import OutOfScopeError, ScopeGuard
 from bugbounty_ctf.session_recorder import SessionRecorder
@@ -143,9 +150,11 @@ __all__ = [
     "ScannerDB",
     "ScopeGuard",
     "SecurityScanner",
+    "ServiceBanner",
     "SessionRecorder",
     "SkillOrchestrator",
     "SmugglingDetector",
+    "Surface",
     "TemplateFinding",
     "TestResult",
     "Track",
@@ -160,6 +169,7 @@ __all__ = [
     "derive_base_url",
     "detect_defenses",
     "detect_ssrf_filter",
+    "detect_surface",
     "discover_content",
     "ensure_nuclei",
     "enumerate_aws_metadata",
@@ -179,6 +189,7 @@ __all__ = [
     "ip_to_decimal",
     "ip_to_hex",
     "ip_to_octal",
+    "list_dead_ends",
     "load_cve_db",
     "load_templates",
     "load_tracks",
@@ -187,6 +198,7 @@ __all__ = [
     "nuclei_scan",
     "post_exploit_enum",
     "recommend_next_test",
+    "record_dead_end",
     "resolve_entrypoint",
     "save_report",
     "select_tracks",

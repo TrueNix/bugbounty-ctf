@@ -24,6 +24,18 @@ All notable changes to this project are documented here.
   modulus whose primes are close together, derives `d`, and decrypts `c`
   (fills the gap advertised in the RSA decision tree). `ScopeGuard` now importable
   from the package top level to match the documented quick-start.
+- **Surface auto-detection** — new `recon.py` module with `detect_surface(target)`
+  that runs `nmap -sV -oX` inside kalibox (no host root), parses XML with stdlib,
+  and maps service product banners to the playbook trigger vocabulary (`nginx`,
+  `apache`, `version-banner`, etc.) so `playbook.select` and `runner.run` receive
+  the right inputs automatically. Falls back to a stdlib TCP connect-scan when
+  nmap is absent. Closes the missing first link in the autonomous loop —
+  `runner.run()` now calls `detect_surface` when no ports/tech are given
+  (`autodetect=True` by default, backward-compatible).
+- **Dead-end feedback** — `record_dead_end` / `list_dead_ends` persist empty-
+  findings track results to the KB (`dead-end::` prefix), so future re-runs can
+  deprioritize known dead walls (symmetric to the existing `learned::` write-back
+  for confirmed findings).
 - **Installation tooling** — `install.sh` (symlink or `--copy` mode), drift
   protection, and an opt-in `--autosync` `on_session_start` hook that pulls the
   latest `main` from GitHub when a Hermes session starts.

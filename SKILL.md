@@ -118,6 +118,25 @@ tracks = select_tracks(ports=open_ports, tech=tech_hints)   # executable form of
 # fan out the parallel_safe tracks (see Delegate section); each track.instruction says what to run
 ```
 
+**Let `detect_surface` do the nmap — don't hand-build the surface yourself.**
+The toolkit now auto-detects the surface.  One call feeds the whole autonomous
+loop with zero manual nmap parsing:
+
+```python
+from bugbounty_ctf.recon import detect_surface
+from bugbounty_ctf.skill_runner import SkillOrchestrator
+
+surface = detect_surface("10.129.x.x")   # nmap -sV -oX inside kalibox; TCP fallback if absent
+runner = SkillOrchestrator("http://10.129.x.x/")
+result = runner.run(*surface.for_run())  # ports + tech auto-fed
+
+# Or let run() autodetect itself (passes ports/tech from nmap automatically):
+result = runner.run()   # same — detect_surface called internally when no ports/tech given
+```
+
+`surface.tech` uses the same playbook vocabulary tokens — `version-banner` fires
+the `cve` track automatically for any service with a version string.
+
 **Before defaulting to web exploitation, look at what the host actually exposes.**
 Many boxes (HTB, pentest scopes) have *no exploitable web app* — the path is
 through infrastructure services (NFS, mail, SMB, RPC) or a versioned product
