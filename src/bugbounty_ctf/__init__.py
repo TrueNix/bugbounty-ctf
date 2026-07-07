@@ -19,7 +19,15 @@ Individual tests:
 """
 
 from bugbounty_ctf.engine import ResponseDiff, SecurityScanner, TestResult
+from bugbounty_ctf.scope import ScopeGuard
 from bugbounty_ctf.skill_runner import SkillOrchestrator
 
 __version__ = "7.0.0"
-__all__ = ["ResponseDiff", "SecurityScanner", "SkillOrchestrator", "TestResult", "__version__"]
+__all__ = [
+    "ResponseDiff",
+    "ScopeGuard",
+    "SecurityScanner",
+    "SkillOrchestrator",
+    "TestResult",
+    "__version__",
+]

@@ -84,6 +84,75 @@ class TestRSACommonModulus:
         assert not result.success
 
 
+class TestRSAFermat:
+    def test_factors_close_primes_and_decrypts(self) -> None:
+        # Two primes only a small gap apart — the textbook Fermat weakness.
+        p, q = 1125899906842679, 1125899906842723  # both prime, gap == 44
+        n = p * q
+        e = 65537
+        m = int.from_bytes(b"flag{fermat}", "big")
+        assert m < n
+        c = pow(m, e, n)
+        ct = CryptoToolkit()
+        result = ct.rsa_fermat(n=n, e=e, c=c)
+        assert result.success
+        assert {result.details["p"], result.details["q"]} == {p, q}
+        assert result.details["m"] == m
+        assert result.flags == ["flag{fermat}"]
+
+    def test_factor_only_without_ciphertext(self) -> None:
+        p, q = 10007, 10009  # adjacent-ish primes, gap 2
+        ct = CryptoToolkit()
+        result = ct.rsa_fermat(n=p * q)
+        assert result.success
+        assert {result.details["p"], result.details["q"]} == {p, q}
+
+    def test_even_modulus_rejected(self) -> None:
+        ct = CryptoToolkit()
+        result = ct.rsa_fermat(n=100)
+        assert not result.success
+
+    def test_distant_primes_give_up(self) -> None:
+        # p and q far apart: bounded iterations should fail rather than hang.
+        n = 3 * 1000003
+        ct = CryptoToolkit()
+        result = ct.rsa_fermat(n=n, max_iterations=5)
+        assert not result.success
+
+
+class TestRSAWiener:
+    def test_recovers_small_private_key(self) -> None:
+        # RSA key with a tiny d (well under the Wiener bound n^0.25/3).
+        p, q = 1099511627791, 1099512676421
+        n = p * q
+        phi = (p - 1) * (q - 1)
+        d = 7  # small private exponent
+        e = pow(d, -1, phi)
+        ct = CryptoToolkit()
+        result = ct.rsa_wiener(n=n, e=e)
+        assert result.success
+        assert result.details["d"] == d
+        assert {result.details["p"], result.details["q"]} == {p, q}
+
+    def test_no_small_d_fails(self) -> None:
+        ct = CryptoToolkit()
+        # e == 65537 with balanced primes: d is large, Wiener must fail cleanly
+        # (and must NOT return the trivial p*1 == n factorization).
+        result = ct.rsa_wiener(n=1000003 * 1000033, e=65537)
+        assert not result.success
+
+
+class TestXORKnownPlaintext:
+    def test_recovers_repeating_key(self) -> None:
+        ct = CryptoToolkit()
+        key = b"KEY"
+        plaintext = b"flag{known_plaintext_xor}"
+        ciphertext = bytes(c ^ key[i % len(key)] for i, c in enumerate(plaintext))
+        recovered = ct.xor_known_plaintext(ciphertext, b"flag")
+        # First len(known) bytes of the key stream are recovered.
+        assert recovered == bytes(c ^ p for c, p in zip(ciphertext[:4], b"flag", strict=False))
+
+
 class TestXORBruteforce:
     def test_single_byte_xor(self) -> None:
         ct = CryptoToolkit()

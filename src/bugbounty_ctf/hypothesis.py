@@ -41,6 +41,8 @@ from bugbounty_ctf.engine import SecurityScanner, confirm_vulnerability
 class TestStep:
     """A single test within a hypothesis."""
 
+    __test__ = False  # not a pytest test class despite the "Test" prefix
+
     payload: str
     expect: str = "different_response"
     weight: float = 0.2

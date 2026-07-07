@@ -795,11 +795,18 @@ print(result["flag_matches"])
 ```
 Given: n, e, c
 
-1. e very small (e=3)? → Cube root if m^e < n
-2. Same n, different e? → Common modulus attack
-3. e very large? → Wiener's attack (small d)
-4. p and q close? → Fermat factorization
+1. e very small (e=3)? → Cube root if m^e < n     → rsa_small_exponent(n, e, c)
+2. Same n, different e? → Common modulus attack    → rsa_common_modulus(n, e1, e2, c1, c2)
+3. e very large? → Wiener's attack (small d)       → rsa_wiener(n, e)
+4. p and q close? → Fermat factorization           → rsa_fermat(n, e, c)
 5. Can factor n? → d = inverse(e, (p-1)*(q-1))
+```
+
+```python
+from bugbounty_ctf.crypto import CryptoToolkit
+ct = CryptoToolkit()
+ct.rsa_fermat(n, e=65537, c=ciphertext)   # factors close primes, derives d, decrypts c → flag
+ct.rsa_wiener(n, e)                        # recovers small private exponent d
 ```
 
 ## Step 3: Binary Exploitation (Pwn)

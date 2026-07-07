@@ -259,12 +259,85 @@ class CryptoToolkit:
             print(f"[FLAG] {flags}")
         return result
 
+    def rsa_fermat(self, n: int, e: int = 65537, c: int | None = None,
+                   max_iterations: int = 1_000_000) -> CryptoResult:
+        """Fermat factorization: factor n when p and q are close together.
+
+        Writes n = a^2 - b^2 = (a-b)(a+b) by scanning a upward from
+        ceil(sqrt(n)) until a^2 - n is a perfect square. Fast only when
+        |p - q| is small (the classic "primes generated too close" weakness).
+        If the private exponent can be derived and ``c`` is supplied, the
+        ciphertext is decrypted and any flag extracted.
+        """
+        if n <= 0 or n % 2 == 0:
+            result = CryptoResult(
+                operation="rsa_fermat",
+                success=False,
+                details={"error": "n must be a positive odd integer"},
+            )
+            self.results.append(result)
+            return result
+
+        a = math.isqrt(n)
+        if a * a < n:
+            a += 1
+        for _ in range(max_iterations):
+            b2 = a * a - n
+            b = math.isqrt(b2)
+            if b * b == b2:
+                p = a + b
+                q = a - b
+                if p * q == n and p != 1 and q != 1:
+                    details: dict[str, Any] = {"p": p, "q": q, "iterations": _}
+                    plaintext = ""
+                    flags: list[str] = []
+                    phi = (p - 1) * (q - 1)
+                    try:
+                        d = self._modinv(e, phi)
+                        details["d"] = d
+                        if c is not None:
+                            m = pow(c, d, n)
+                            try:
+                                plaintext = bytes.fromhex(hex(m)[2:]).decode(
+                                    "utf-8", errors="replace"
+                                )
+                            except Exception:
+                                plaintext = str(m)
+                            details["m"] = m
+                            flags = self._extract_flags(plaintext)
+                    except ValueError:
+                        pass
+                    result = CryptoResult(
+                        operation="rsa_fermat",
+                        success=True,
+                        result=plaintext or f"p={p}, q={q}",
+                        flags=flags,
+                        details=details,
+                    )
+                    self.results.append(result)
+                    print(f"[+] Fermat: p={p}, q={q}")
+                    if flags:
+                        print(f"    [FLAG] {flags}")
+                    return result
+            a += 1
+
+        result = CryptoResult(
+            operation="rsa_fermat",
+            success=False,
+            details={"error": "no factorization found (primes not close enough)"},
+        )
+        self.results.append(result)
+        return result
+
     def rsa_wiener(self, n: int, e: int) -> CryptoResult:
         """Wiener's attack: small private key d."""
         cf = self._continued_fraction(e, n)
         convergents = self._convergents(cf)
 
-        for k, d in convergents:
+        # Convergents are (denominator, numerator) of e/n. In Wiener's attack
+        # e/n ≈ k/d, so the convergent's numerator is the candidate k and its
+        # denominator is the candidate private exponent d.
+        for d, k in convergents:
             if k == 0:
                 continue
             phi = (e * d - 1) // k
@@ -275,7 +348,7 @@ class CryptoToolkit:
                 if sqrt_disc * sqrt_disc == discriminant:
                     p = (b + sqrt_disc) // 2
                     q = n // p
-                    if p * q == n:
+                    if p * q == n and p != 1 and q != 1:
                         result = CryptoResult(
                             operation="rsa_wiener",
                             success=True,

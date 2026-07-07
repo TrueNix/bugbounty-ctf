@@ -9,6 +9,11 @@ from bugbounty_ctf.scope import OutOfScopeError, ScopeGuard
 
 
 class TestScopeGuard:
+    def test_top_level_import_matches_documented_quick_start(self) -> None:
+        from bugbounty_ctf import ScopeGuard as PublicScopeGuard
+
+        assert PublicScopeGuard is ScopeGuard
+
     def test_exact_host_allowed(self) -> None:
         guard = ScopeGuard(["api.example.com"], allow_subdomains=False)
         assert guard.is_allowed("https://api.example.com/x")
