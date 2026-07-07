@@ -1073,7 +1073,11 @@ class SkillOrchestrator:
                     if auto_ports or auto_tech:
                         ports = auto_ports
                         tech = auto_tech
-                        print(f"[recon] auto-detected: ports={auto_ports}, tech={auto_tech}")
+                        vhost_hint = f", vhosts={list(surface.vhosts)}" if surface.vhosts else ""
+                        print(
+                            f"[recon] auto-detected: ports={auto_ports}, "
+                            f"tech={auto_tech}{vhost_hint}"
+                        )
             except Exception as exc:
                 print(f"[recon] surface autodetect failed ({exc}), proceeding without")
 
