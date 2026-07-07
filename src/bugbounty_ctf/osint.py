@@ -500,4 +500,19 @@ class OSINTToolkit:
         return metadata
 
     def get_findings(self) -> list[dict[str, Any]]:
-        return [f.to_dict() for f in self.findings]
+        seen: set[tuple[str, str, str, str, bool, str]] = set()
+        results: list[dict[str, Any]] = []
+        for finding in self.findings:
+            key = (
+                finding.source,
+                finding.finding_type,
+                finding.value,
+                finding.url,
+                finding.is_flag,
+                repr(sorted(finding.details.items())),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(finding.to_dict())
+        return results
