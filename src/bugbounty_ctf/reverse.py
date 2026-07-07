@@ -241,15 +241,21 @@ class ReverseToolkit:
         if rc == 0 and stdout.strip():
             for line in stdout.strip().split("\n"):
                 parts = line.split()
-                if len(parts) >= 3:
+                if len(parts) == 2 and parts[0] == "U":
+                    sym_type = parts[0]
+                    name = parts[1]
+                elif len(parts) >= 3:
                     sym_type = parts[1]
                     name = parts[2]
-                    if sym_type in ("T", "t"):
-                        symbols["functions"].append(name)
-                    elif sym_type in ("D", "d", "B", "b", "R", "r"):
-                        symbols["variables"].append(name)
-                    elif sym_type == "U":
-                        symbols["imports"].append(name)
+                else:
+                    continue
+
+                if sym_type in ("T", "t"):
+                    symbols["functions"].append(name)
+                elif sym_type in ("D", "d", "B", "b", "R", "r"):
+                    symbols["variables"].append(name)
+                elif sym_type == "U":
+                    symbols["imports"].append(name)
 
             self.findings.append(
                 REFinding(
