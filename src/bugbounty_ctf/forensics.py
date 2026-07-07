@@ -433,7 +433,26 @@ class ForensicsToolkit:
 
     def get_flags(self) -> list[str]:
         """Return all flags found."""
-        return [f.value for f in self.findings if f.is_flag]
+        flags: list[str] = []
+        seen: set[str] = set()
+
+        for finding in self.findings:
+            if not finding.is_flag:
+                continue
+
+            detail_flags = finding.details.get("flags")
+            if isinstance(detail_flags, list):
+                candidates = [flag for flag in detail_flags if isinstance(flag, str)]
+            else:
+                candidates = [finding.value]
+
+            for flag in candidates:
+                if flag in seen:
+                    continue
+                seen.add(flag)
+                flags.append(flag)
+
+        return flags
 
     def get_results(self) -> list[dict[str, Any]]:
         """Return all findings as dicts."""
