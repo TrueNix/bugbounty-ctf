@@ -19,8 +19,9 @@ This module makes that step automatic:
   fires automatically.
 - Falls back to a plain stdlib TCP connect-scan when nmap is unavailable so
   ``detect_surface`` still returns a usable ``Surface`` offline.
-- Exposes ``record_dead_end`` / ``list_dead_ends`` for Part B: fan-out tracks
-  that produced no findings can persist that fact so re-runs skip them.
+- Exposes ``record_dead_end`` / ``list_dead_ends`` / ``clear_dead_end`` for
+  Part B: fan-out tracks that produced no findings can persist that fact so
+  re-runs deprioritize them.
 
 Usage::
 
@@ -49,6 +50,7 @@ __all__ = [
     "Surface",
     "_parse_nmap_xml",
     "_tcp_connect_scan",
+    "clear_dead_end",
     "detect_surface",
     "list_dead_ends",
     "record_dead_end",
@@ -101,6 +103,13 @@ class Surface:
     def for_run(self) -> tuple[list[int], list[str]]:
         """Unpack into (ports, tech) lists for ``runner.run(ports=, tech=)``."""
         return list(self.open_ports), list(self.tech)
+
+    def service_versions(self) -> list[dict[str, str]]:
+        return [
+            {"product": service.product, "version": service.version}
+            for service in self.services
+            if service.product and service.version
+        ]
 
 
 # ── XML parser ────────────────────────────────────────────────────────────
@@ -294,6 +303,18 @@ def record_dead_end(
     body = f"Track '{track_id}' produced no findings on {host}. {reason}".strip()
     key = f"{_DEAD_END_PREFIX}{host}::{track_id}"
     return kb.add_lesson(title, body, tags="dead-end", host=host, key=key)
+
+
+def clear_dead_end(
+    kb: KnowledgeBase,
+    *,
+    host: str,
+    track_id: str,
+) -> bool:
+    filename = f"{kb.LESSON_PREFIX}{_DEAD_END_PREFIX}{host}::{track_id}"
+    cursor = kb.conn.execute("DELETE FROM docs WHERE filename = ?", (filename,))
+    kb.conn.commit()
+    return cursor.rowcount > 0
 
 
 def list_dead_ends(

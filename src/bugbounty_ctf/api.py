@@ -89,6 +89,7 @@ from bugbounty_ctf.quick_tests import (
 from bugbounty_ctf.recon import (
     ServiceBanner,
     Surface,
+    clear_dead_end,
     detect_surface,
     list_dead_ends,
     record_dead_end,
@@ -162,6 +163,7 @@ __all__ = [
     "WordlistLoader",
     "builtin_template_scan",
     "bypass_url_filter",
+    "clear_dead_end",
     "confirm_vulnerability",
     "correlate_cves",
     "decode_jwt",

@@ -26,6 +26,7 @@ from typing import Any
 
 from bugbounty_ctf.engine import SecurityScanner
 from bugbounty_ctf.knowledge import KnowledgeBase
+from bugbounty_ctf.recon import clear_dead_end, list_dead_ends, record_dead_end
 from bugbounty_ctf.taint import render, render_json
 
 # Minimum recalled-pattern confidence for run(mode="auto") to FRONT-LOAD it
@@ -71,6 +72,7 @@ class PhaseGuidance:
     prior_memory: list[dict[str, Any]] = field(default_factory=list)
     # Resolved hypotheses and high-confidence observations from past runs.
     prior_hypotheses: list[dict[str, Any]] = field(default_factory=list)
+    prior_dead_ends: list[dict[str, Any]] = field(default_factory=list)
     prior_observations: list[dict[str, Any]] = field(default_factory=list)
     # Generalized, surface-keyed attack patterns recalled from prior engagements
     # (the cross-box pattern memory). Plain dicts so they render directly.
@@ -251,6 +253,12 @@ class SkillOrchestrator:
             )
         return out
 
+    def _recall_dead_ends(self) -> list[dict[str, Any]]:
+        try:
+            return list_dead_ends(self.kb, host=self.scanner.host)
+        except Exception:
+            return []
+
     def _recall_observations(self, limit: int = 40) -> list[dict[str, Any]]:
         """Recall high-confidence observations (with their next-test hints)."""
         try:
@@ -406,6 +414,7 @@ class SkillOrchestrator:
             scanner_state=self._format_state(),
             prior_memory=self._recall_prior(),
             prior_hypotheses=self._recall_hypotheses(),
+            prior_dead_ends=self._recall_dead_ends(),
             prior_observations=self._recall_observations(),
             recalled_patterns=self._recall_patterns(),
         )
@@ -433,6 +442,7 @@ class SkillOrchestrator:
             scanner_state=self._format_state(),
             prior_memory=self._recall_prior(),
             prior_hypotheses=self._recall_hypotheses(),
+            prior_dead_ends=self._recall_dead_ends(),
             prior_observations=self._recall_observations(),
         )
 
@@ -715,6 +725,22 @@ class SkillOrchestrator:
                     + ", ".join(
                         f"{render(h['vuln_type'])}@{render(h['param'])}" for h in rejected[:8]
                     )
+                )
+
+        if guidance.prior_dead_ends:
+            track_ids = [
+                render(str(d.get("track_id", "?")))
+                for d in guidance.prior_dead_ends[:15]
+                if d.get("track_id")
+            ]
+            if track_ids:
+                lines.extend(
+                    [
+                        "",
+                        "## Known dead-ends on this host (deprioritize — no findings in past runs)",
+                        "  - " + ", ".join(track_ids),
+                        "Re-test only if the surface changed (new port/service since last run).",
+                    ]
                 )
 
         if guidance.prior_observations:
@@ -1156,7 +1182,12 @@ class SkillOrchestrator:
         """
         prompts = [(label, self._build_task_prompt(label, instr)) for label, instr in tasks]
         if not prompts:
-            return {"responses": {}, "merged": 0}
+            return {
+                "responses": {},
+                "merged": 0,
+                "dead_ends_recorded": 0,
+                "dead_ends_cleared": 0,
+            }
 
         def run_one(item: tuple[str, str]) -> tuple[str, str]:
             label, prompt = item
@@ -1187,6 +1218,26 @@ class SkillOrchestrator:
         if merged:
             print(f"[fan-out] Merged {merged} reported finding(s)")
 
+        dead_ends_recorded = 0
+        dead_ends_cleared = 0
+        for label, response in responses.items():
+            track_findings = self._parse_findings(response)
+            track_error = response.startswith("[TRACK ERROR]")
+            if not track_findings or track_error:
+                reason = "track error" if track_error else "no findings reported"
+                with contextlib.suppress(Exception):
+                    if record_dead_end(
+                        self.kb,
+                        host=self.scanner.host,
+                        track_id=label,
+                        reason=reason,
+                    ):
+                        dead_ends_recorded += 1
+            else:
+                with contextlib.suppress(Exception):
+                    if clear_dead_end(self.kb, host=self.scanner.host, track_id=label):
+                        dead_ends_cleared += 1
+
         # Final step: persist what worked. Lessons (technique-level, secret-free)
         # feed the per-host KB; the captured pattern (generalized, surface-keyed)
         # feeds the cross-box pattern memory. Confirmed = the merged finding set.
@@ -1202,6 +1253,8 @@ class SkillOrchestrator:
         return {
             "responses": responses,
             "merged": merged,
+            "dead_ends_recorded": dead_ends_recorded,
+            "dead_ends_cleared": dead_ends_cleared,
             "lessons_written": lessons,
             "pattern_captured": pattern_id,
             "pattern_feedback": pattern_feedback,

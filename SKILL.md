@@ -378,6 +378,11 @@ The toolkit learns across runs rather than starting cold each time:
   `reindex()` and are surfaced by `search()` / `suggest_methodology()`, so a
   future engagement against similar tech recalls what actually worked — not just
   the static reference corpus.
+- **Dead-end feedback** — fan-out tracks that return an empty findings block or
+  a track error write a per-host `dead-end` lesson to the knowledge base. Later
+  recon/research guidance lists those track ids as deprioritized, advisory
+  memory. If a later run produces findings for that track, the stale dead-end is
+  cleared so surface changes do not poison future runs.
 - **Durable reasoning** — `ObservationStore(db=scanner.db, target_host=...)`
   and `HypothesisEngine` persist observations and confirmed/rejected hypotheses
   to `ScannerDB` (`query_observations` / `query_hypotheses`), so the agent's

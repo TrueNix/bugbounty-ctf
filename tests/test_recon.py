@@ -236,6 +236,28 @@ class TestSurfaceForRun:
         assert isinstance(tracks, list)
 
 
+class TestSurfaceServiceVersions:
+    def test_surface_service_versions_shape(self) -> None:
+        from bugbounty_ctf.recon import ServiceBanner, Surface
+
+        surface = Surface(
+            host="10.10.10.5",
+            open_ports=(22, 80, 443, 8080),
+            services=(
+                ServiceBanner(22, "tcp", "OpenSSH", "", "OpenSSH"),
+                ServiceBanner(80, "tcp", "nginx", "1.22.0", "nginx 1.22.0"),
+                ServiceBanner(443, "tcp", "", "3.0.2", "3.0.2"),
+                ServiceBanner(8080, "tcp", "Apache httpd", "2.4.56", "Apache httpd 2.4.56"),
+            ),
+            tech=("version-banner",),
+        )
+
+        assert surface.service_versions() == [
+            {"product": "nginx", "version": "1.22.0"},
+            {"product": "Apache httpd", "version": "2.4.56"},
+        ]
+
+
 class TestFallbackTcpConnect:
     """Test 5: when nmap is absent, fall back to TCP connect-scan."""
 
@@ -342,3 +364,32 @@ class TestDeadEndFeedback:
         record_dead_end(kb, host="10.10.10.5", track_id="mail", reason="no MX ports open")
         dead = list_dead_ends(kb, host="10.10.10.5")
         assert any(d["track_id"] == "mail" for d in dead)
+
+    def test_clear_dead_end_removes_record(self, tmp_path: Any) -> None:
+        from bugbounty_ctf.knowledge import KnowledgeBase
+        from bugbounty_ctf.recon import clear_dead_end, list_dead_ends, record_dead_end
+
+        kb = KnowledgeBase(db_path=str(tmp_path / "test.db"), references_dir=str(tmp_path))
+        record_dead_end(kb, host="10.10.10.5", track_id="mail", reason="no findings")
+
+        assert clear_dead_end(kb, host="10.10.10.5", track_id="mail")
+        assert list_dead_ends(kb, host="10.10.10.5") == []
+
+    def test_clear_is_idempotent(self, tmp_path: Any) -> None:
+        from bugbounty_ctf.knowledge import KnowledgeBase
+        from bugbounty_ctf.recon import clear_dead_end
+
+        kb = KnowledgeBase(db_path=str(tmp_path / "test.db"), references_dir=str(tmp_path))
+
+        assert not clear_dead_end(kb, host="10.10.10.5", track_id="mail")
+
+
+def test_recon_dead_end_entrypoints_import_cleanly() -> None:
+    import importlib
+
+    recon = importlib.import_module("bugbounty_ctf.recon")
+    api = importlib.import_module("bugbounty_ctf.api")
+
+    for name in ("detect_surface", "record_dead_end", "clear_dead_end"):
+        assert callable(getattr(recon, name))
+        assert callable(getattr(api, name))

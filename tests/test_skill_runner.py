@@ -44,6 +44,20 @@ def runner(tmp_path: Path) -> SkillOrchestrator:
     return SkillOrchestrator("http://target.test/", scanner=scanner, knowledge_base=_FakeKB())
 
 
+def _runner_with_real_kb(tmp_path: Path) -> SkillOrchestrator:
+    from bugbounty_ctf.knowledge import KnowledgeBase
+
+    refs = tmp_path / "refs"
+    refs.mkdir()
+    scanner = SecurityScanner(
+        "http://target.test/",
+        state_file=str(tmp_path / "state.json"),
+        db=ScannerDB(":memory:"),
+    )
+    kb = KnowledgeBase(db_path=str(tmp_path / "kb.db"), references_dir=str(refs))
+    return SkillOrchestrator("http://target.test/", scanner=scanner, knowledge_base=kb)
+
+
 class TestGuidance:
     def test_each_phase_returns_its_guidance(self, runner: SkillOrchestrator) -> None:
         assert runner.get_recon_guidance().phase == "recon"
@@ -220,6 +234,22 @@ class TestSecondBrain:
         assert "Prior hypotheses" in prompt
         assert "skip" in prompt  # rejected hypotheses guidance
         assert "Prior observations" in prompt
+
+    def test_recon_guidance_lists_dead_ends(self, tmp_path: Path) -> None:
+        from bugbounty_ctf.recon import record_dead_end
+
+        orch = _runner_with_real_kb(tmp_path)
+        record_dead_end(orch.kb, host=orch.scanner.host, track_id="mail", reason="no findings")
+        record_dead_end(orch.kb, host=orch.scanner.host, track_id="smb", reason="track error")
+
+        guidance = orch.get_recon_guidance()
+        prompt = SkillOrchestrator._build_agent_prompt(guidance)
+
+        assert {d["track_id"] for d in guidance.prior_dead_ends} == {"mail", "smb"}
+        assert "## Known dead-ends on this host (deprioritize" in prompt
+        assert "mail" in prompt
+        assert "smb" in prompt
+        assert "Re-test only if the surface changed" in prompt
 
 
 class TestStructuredOutput:
@@ -483,7 +513,12 @@ class TestFanOut:
         assert {"nfs-export", "weak-cred"} <= types
 
     def test_empty_tasks_noop(self, runner: SkillOrchestrator) -> None:
-        assert runner.fan_out([]) == {"responses": {}, "merged": 0}
+        assert runner.fan_out([]) == {
+            "responses": {},
+            "merged": 0,
+            "dead_ends_recorded": 0,
+            "dead_ends_cleared": 0,
+        }
 
     def test_task_prompt_has_bootstrap_and_contract(self, runner: SkillOrchestrator) -> None:
         prompt = runner._build_task_prompt("nfs", "Enumerate NFS exports")
@@ -518,6 +553,56 @@ class TestFanOut:
         assert "[TRACK ERROR]" in result["responses"]["boom"]
         assert result["merged"] == 1
         assert any(f["type"] == "nfs-export" for f in runner.scanner.findings)
+
+    def test_fan_out_records_empty_track_as_dead_end(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from bugbounty_ctf.recon import list_dead_ends
+
+        orch = _runner_with_real_kb(tmp_path)
+        per_label = {
+            "empty": "<FINDINGS>[]</FINDINGS>",
+            "web": (
+                '<FINDINGS>[{"type":"xss","endpoint":"/","method":"GET",'
+                '"payload":"","evidence":"reflected","confidence":"high",'
+                '"source":"test"}]</FINDINGS>'
+            ),
+        }
+
+        def fake_run(prompt: str, *, timeout: int, label: str = "agent") -> str:
+            return per_label[label]
+
+        monkeypatch.setattr(orch, "_run_hermes", fake_run)
+
+        result = orch.fan_out([("empty", "no-op track"), ("web", "productive track")])
+
+        dead_ends = list_dead_ends(orch.kb, host=orch.scanner.host)
+        assert result["dead_ends_recorded"] == 1
+        assert result["dead_ends_cleared"] == 0
+        assert {d["track_id"] for d in dead_ends} == {"empty"}
+
+    def test_fan_out_clears_dead_end_when_track_now_productive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from bugbounty_ctf.recon import list_dead_ends, record_dead_end
+
+        orch = _runner_with_real_kb(tmp_path)
+        record_dead_end(orch.kb, host=orch.scanner.host, track_id="mail", reason="no findings")
+
+        def fake_run(prompt: str, *, timeout: int, label: str = "agent") -> str:
+            return (
+                '<FINDINGS>[{"type":"weak-cred","endpoint":"imap","method":"LOGIN",'
+                '"payload":"admin","evidence":"login accepted","confidence":"high",'
+                '"source":"test"}]</FINDINGS>'
+            )
+
+        monkeypatch.setattr(orch, "_run_hermes", fake_run)
+
+        result = orch.fan_out([("mail", "retry mail")])
+
+        assert result["dead_ends_recorded"] == 0
+        assert result["dead_ends_cleared"] == 1
+        assert list_dead_ends(orch.kb, host=orch.scanner.host) == []
 
 
 def _track(track_id: str, *, parallel_safe: bool = True, capability: str = "web_app") -> Any:
