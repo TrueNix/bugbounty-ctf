@@ -28,6 +28,15 @@ htmlcov/
 security_state.json
 security_reports/
 
+# Engagement memory (never commit — holds live target findings/secrets).
+# The runtime KB defaults to ~/.hermes/knowledge.db (already ignored above).
+# Any stray knowledge.db / scanner.db in the tree is ALSO ignored...
+knowledge.db
+scanner.db
+*.scanner.db
+# ...EXCEPT the curated, secret-free reference index we ship on purpose:
+!data/reference_knowledge.db
+
 # IDE
 .idea/
 .vscode/
@@ -37,4 +46,5 @@ security_reports/
 
 # OS
 .DS_Store
-Thumbs.db.omo/
+Thumbs.db
+.omo/
