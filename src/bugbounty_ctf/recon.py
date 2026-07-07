@@ -35,10 +35,12 @@ Usage::
 
 from __future__ import annotations
 
+import http.client
 import socket
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from bugbounty_ctf.execenv import ExecEnv, default_exec_env
 
@@ -62,9 +64,13 @@ __all__ = [
 # order; a product can emit multiple tokens.
 _PRODUCT_TO_TECH: list[tuple[str, str]] = [
     ("nginx", "nginx"),
+    ("nginx", "http"),
     ("apache", "apache"),
+    ("apache", "http"),
     ("php", "php"),
+    ("php", "http"),
     ("werkzeug", "werkzeug"),
+    ("werkzeug", "http"),
     ("http", "http"),
     ("iis", "http"),
     ("tomcat", "http"),
@@ -144,7 +150,10 @@ def _parse_nmap_xml(xml_text: str, *, host: str) -> Surface:
         raw = " ".join(p for p in (product, version, extra) if p).strip()
         banners.append(ServiceBanner(port=portid, proto=proto, product=product, version=version, raw=raw))
 
-    # Build playbook tech tokens
+    return _surface_from_banners(host, banners)
+
+
+def _surface_from_banners(host: str, banners: list[ServiceBanner]) -> Surface:
     tech_set: set[str] = set()
     has_version_banner = False
     for b in banners:
@@ -160,7 +169,7 @@ def _parse_nmap_xml(xml_text: str, *, host: str) -> Surface:
 
     return Surface(
         host=host,
-        open_ports=tuple(sorted(b.port for b in banners)),
+        open_ports=tuple(sorted({b.port for b in banners})),
         services=tuple(banners),
         tech=tuple(sorted(tech_set)),
     )
@@ -193,28 +202,98 @@ def _tcp_connect_scan(
     return open_ports
 
 
-def _fallback_surface(host: str) -> Surface:
-    """TCP connect-scan over all playbook trigger ports and return a minimal Surface."""
+def _parse_port_text(port_text: str) -> int | None:
+    try:
+        port = int(port_text)
+    except ValueError:
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
+def _extract_target_port(target: str) -> int | None:
+    if "://" in target:
+        parsed = urlparse(target)
+        try:
+            return parsed.port
+        except ValueError:
+            return None
+    if target.startswith("["):
+        end = target.find("]")
+        suffix = target[end + 1 :] if end != -1 else ""
+        return _parse_port_text(suffix[1:]) if suffix.startswith(":") else None
+    if target.count(":") != 1:
+        return None
+    port_part = target.rsplit(":", 1)[1].split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    return _parse_port_text(port_part)
+
+
+def _explicit_ports(ports: str) -> set[int]:
+    selected: set[int] = set()
+    for part in ports.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        if "-" in token:
+            start_text, end_text = token.split("-", 1)
+            start = _parse_port_text(start_text.strip())
+            end = _parse_port_text(end_text.strip())
+            if start is not None and end is not None and start <= end:
+                selected.update(range(start, end + 1))
+            continue
+        port = _parse_port_text(token)
+        if port is not None:
+            selected.add(port)
+    return selected
+
+
+def _fallback_ports(ports: str, target_port: int | None) -> list[int]:
     from bugbounty_ctf.playbook import load_tracks
 
-    all_ports: set[int] = set()
-    for track in load_tracks():
-        all_ports.update(track.ports)
+    selected: set[int]
+    if ports not in {"top", "all"}:
+        selected = _explicit_ports(ports)
+    else:
+        selected = set()
+        for track in load_tracks():
+            selected.update(track.ports)
+    if target_port is not None:
+        selected.add(target_port)
+    return sorted(selected)
 
-    open_ports = _tcp_connect_scan(host, ports=sorted(all_ports), timeout=1.0)
 
-    # Build tech from port membership only (no version info available)
-    tech_set: set[str] = set()
-    web_ports = {80, 443, 8080, 8000, 8443, 8888}
-    if any(p in web_ports for p in open_ports):
-        tech_set.add("http")
+def _http_service_banner(host: str, port: int) -> ServiceBanner | None:
+    conn = http.client.HTTPConnection(host, port, timeout=1.0)
+    try:
+        conn.request("GET", "/")
+        response = conn.getresponse()
+        server = response.getheader("Server", "")
+        response.read()
+    except (OSError, http.client.HTTPException):
+        return None
+    finally:
+        conn.close()
+    product, version = _split_server_header(server)
+    raw = " ".join(part for part in (product, version) if part).strip()
+    return ServiceBanner(port=port, proto="tcp", product=product, version=version, raw=raw)
 
-    return Surface(
-        host=host,
-        open_ports=tuple(sorted(open_ports)),
-        services=(),
-        tech=tuple(sorted(tech_set)),
-    )
+
+def _split_server_header(server: str) -> tuple[str, str]:
+    first = server.strip().split(" ", 1)[0]
+    if not first:
+        return "http", ""
+    product, separator, version = first.partition("/")
+    return product or "http", version if separator else ""
+
+
+def _fallback_surface(host: str, ports: str = "top", target_port: int | None = None) -> Surface:
+    scan_ports = _fallback_ports(ports, target_port)
+    open_ports = _tcp_connect_scan(host, ports=scan_ports, timeout=1.0)
+
+    banners: list[ServiceBanner] = []
+    for port in open_ports:
+        banner = _http_service_banner(host, port)
+        banners.append(banner or ServiceBanner(port=port, proto="tcp", product="", version="", raw=""))
+    return _surface_from_banners(host, banners)
 
 
 # ── public API ────────────────────────────────────────────────────────────
@@ -243,10 +322,13 @@ def detect_surface(
     """
     exec_env = env or default_exec_env()
     host = _extract_host(target)
+    target_port = _extract_target_port(target)
 
     # Build nmap argv
     argv = ["nmap", "-sV", "-Pn", "-oX", "-"]
-    if ports == "top":
+    if target_port is not None and ports == "top":
+        argv += ["-p", str(target_port)]
+    elif ports == "top":
         argv += ["--top-ports", "1000"]
     elif ports == "all":
         argv += ["-p-"]
@@ -262,7 +344,7 @@ def detect_surface(
         pass
 
     # nmap unavailable or failed — stdlib TCP fallback
-    return _fallback_surface(host)
+    return _fallback_surface(host, ports=ports, target_port=target_port)
 
 
 def _extract_host(target: str) -> str:
