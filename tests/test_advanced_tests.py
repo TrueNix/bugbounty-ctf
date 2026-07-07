@@ -440,6 +440,7 @@ class TestSsrfAndAws:
         assert "127.0.0.1" in result["blocked_substrings"]
 
     def test_generate_aws_presigned_url_includes_sigv4_query_params(self) -> None:
+        pytest.importorskip("boto3")  # boto3 is an optional dep; skip when absent
         url = generate_aws_presigned_url(
             "sts",
             "GetCallerIdentity",
