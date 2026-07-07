@@ -8,11 +8,73 @@ into shell strings with shell=True.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import time
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
+
+_FORM_RE = re.compile(r"<form([^>]*)>(.*?)</form>", re.DOTALL | re.IGNORECASE)
+_TAG_ATTR_RE = re.compile(r"([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*[\"']([^\"']*)[\"']")
+_INPUT_TAG_RE = re.compile(r"<input\b([^>]*)>", re.IGNORECASE)
+_TEXTAREA_TAG_RE = re.compile(r"<textarea\b([^>]*)>", re.IGNORECASE)
+_SELECT_TAG_RE = re.compile(r"<select\b([^>]*)>", re.IGNORECASE)
+_HREF_RE = re.compile(r"href\s*=\s*[\"']([^\"']*)[\"']", re.IGNORECASE)
+_SCRIPT_SRC_RE = re.compile(r"<script\b[^>]*src\s*=\s*[\"']([^\"']*)[\"']", re.IGNORECASE)
+
+
+def _tag_attrs(tag: str) -> dict[str, str]:
+    return {match.group(1).lower(): match.group(2) for match in _TAG_ATTR_RE.finditer(tag)}
+
+
+def _extract_form_inputs(form_html: str) -> list[dict[str, str]]:
+    inputs: list[dict[str, str]] = []
+    for match in _INPUT_TAG_RE.finditer(form_html):
+        attrs = _tag_attrs(match.group(1))
+        if name := attrs.get("name"):
+            inputs.append(
+                {
+                    "name": name,
+                    "value": attrs.get("value", ""),
+                    "type": attrs.get("type", "text"),
+                }
+            )
+    for pattern, input_type in [(_TEXTAREA_TAG_RE, "textarea"), (_SELECT_TAG_RE, "select")]:
+        for match in pattern.finditer(form_html):
+            attrs = _tag_attrs(match.group(1))
+            if name := attrs.get("name"):
+                inputs.append({"name": name, "value": "", "type": input_type})
+    return inputs
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(items))
+
+
+def _extract_surface(body: str, base: str) -> dict[str, Any]:
+    forms: list[dict[str, Any]] = []
+    for match in _FORM_RE.finditer(body):
+        attrs = _tag_attrs(match.group(1))
+        forms.append(
+            {
+                "method": attrs.get("method", "GET").upper(),
+                "action": urljoin(base, attrs.get("action", "")),
+                "inputs": _extract_form_inputs(match.group(2)),
+            }
+        )
+
+    links = [
+        urljoin(base, link)
+        for link in _HREF_RE.findall(body)
+        if link and not link.startswith(("#", "javascript:", "mailto:", "data:"))
+    ]
+    scripts = [
+        urljoin(base, script)
+        for script in _SCRIPT_SRC_RE.findall(body)
+        if script and not script.startswith(("javascript:", "data:"))
+    ]
+    return {"forms": forms, "links": _dedupe(links), "scripts": _dedupe(scripts)}
 
 
 def run_cmd(args: list[str], timeout: int = 30) -> tuple[str, str, int]:
@@ -105,6 +167,12 @@ def recon_target(url: str, quick: bool = False) -> dict[str, Any]:
             tech_hints["framework"] = "Django"
     result["sections"]["technology"] = tech_hints
 
+    root_body = _curl_body(base)
+    surface = _extract_surface(root_body, base)
+    result["sections"]["forms"] = surface["forms"]
+    result["sections"]["links"] = surface["links"]
+    result["sections"]["scripts"] = surface["scripts"]
+
     # 2. robots.txt & sitemap — check status code, not body content
     print("[*] Checking robots.txt and sitemap")
     for path in ["/robots.txt", "/sitemap.xml"]:
@@ -186,7 +254,6 @@ def recon_target(url: str, quick: bool = False) -> dict[str, Any]:
     vulns: list[dict[str, str]] = []
 
     # Check for directory listing
-    root_body = _curl_body(base)
     if "Index of" in root_body:
         vulns.append({"type": "Directory Listing", "path": "/", "severity": "Low"})
 
@@ -205,6 +272,9 @@ def recon_target(url: str, quick: bool = False) -> dict[str, Any]:
     # Summary
     result["summary"] = {
         "technology": tech_hints,
+        "forms_found": len(result["sections"]["forms"]),
+        "links_found": len(result["sections"]["links"]),
+        "scripts_found": len(result["sections"]["scripts"]),
         "security_headers_missing": len(missing_headers),
         "interesting_paths_found": len(found_paths),
         "quick_vulns_found": len(vulns),
@@ -240,6 +310,24 @@ def recon_report(result: dict[str, Any]) -> str:
         lines.append("\nINTERESTING PATHS:")
         for p in result["sections"]["interesting_paths"]:
             lines.append(f"  [{p['status']}] {p['path']}")
+
+    if result["sections"].get("forms"):
+        lines.append("\nFORMS:")
+        for form in result["sections"]["forms"]:
+            lines.append(f"  [{form.get('method', 'GET')}] {form.get('action', '')}")
+            field_names = [field.get("name", "") for field in form.get("inputs", [])]
+            if field_names:
+                lines.append(f"    Fields: {', '.join(field_names)}")
+
+    if result["sections"].get("links"):
+        lines.append("\nLINKS:")
+        for link in result["sections"]["links"]:
+            lines.append(f"  {link}")
+
+    if result["sections"].get("scripts"):
+        lines.append("\nSCRIPTS:")
+        for script in result["sections"]["scripts"]:
+            lines.append(f"  {script}")
 
     if result["sections"].get("security_headers"):
         sec = result["sections"]["security_headers"]
