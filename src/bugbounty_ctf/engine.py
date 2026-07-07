@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import urljoin, urlparse
 
 import requests
+import urllib3
 
 from bugbounty_ctf.scope import ScopeGuard
 
@@ -963,11 +964,21 @@ class SecurityScanner:
         db: ScannerDB | None = None,
         scope: ScopeGuard | None = None,
         headers: dict[str, str] | None = None,
+        verify: bool = False,
     ) -> None:
+        """Initialize scanner state.
+
+        TLS certificate verification defaults to verify=False for lab and CTF
+        targets with self-signed certificates; pass verify=True for strict TLS.
+        """
         self.base_url = base_url.rstrip("/")
         self.host = urlparse(base_url).hostname or "unknown"
         self.scope = scope
         self.session = session or requests.Session()
+        self.verify = verify
+        self.session.verify = verify
+        if not verify:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         if headers:
             self.session.headers.update(headers)
         self.state_file = str(state_file or _default_state_file(base_url))

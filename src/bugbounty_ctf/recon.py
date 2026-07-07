@@ -36,9 +36,12 @@ Usage::
 from __future__ import annotations
 
 import http.client
+import re
 import socket
+import ssl
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -82,6 +85,8 @@ _PRODUCT_TO_TECH: list[tuple[str, str]] = [
 
 # Dead-end key prefix — mirrors the learned:: convention in KnowledgeBase.
 _DEAD_END_PREFIX = "dead-end::"
+_REDIRECT_URL_RE = re.compile(r"https?://[^\s\"'<>),]+")
+_HTTP_REDIRECT_PORTS = {80, 443, 8000, 8080, 8443}
 
 
 # ── dataclasses ────────────────────────────────────────────────────────────
@@ -96,6 +101,7 @@ class ServiceBanner:
     product: str
     version: str
     raw: str  # e.g. "nginx 1.22.0"
+    redirect_locations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -106,6 +112,7 @@ class Surface:
     open_ports: tuple[int, ...]
     services: tuple[ServiceBanner, ...]
     tech: tuple[str, ...]  # playbook-vocabulary tokens
+    vhosts: tuple[str, ...] = ()
 
     def for_run(self) -> tuple[list[int], list[str]]:
         """Unpack into (ports, tech) lists for ``runner.run(ports=, tech=)``."""
@@ -142,8 +149,18 @@ def _parse_nmap_xml(xml_text: str, *, host: str) -> Surface:
         portid = int(port_el.get("portid", 0))
         proto = port_el.get("protocol", "tcp")
         svc_el = port_el.find("service")
+        redirect_locations = _nmap_redirect_locations(port_el, svc_el)
         if svc_el is None:
-            banners.append(ServiceBanner(port=portid, proto=proto, product="", version="", raw=""))
+            banners.append(
+                ServiceBanner(
+                    port=portid,
+                    proto=proto,
+                    product="",
+                    version="",
+                    raw="",
+                    redirect_locations=redirect_locations,
+                )
+            )
             continue
 
         product = svc_el.get("product", "")
@@ -151,7 +168,14 @@ def _parse_nmap_xml(xml_text: str, *, host: str) -> Surface:
         extra = svc_el.get("extrainfo", "")
         raw = " ".join(p for p in (product, version, extra) if p).strip()
         banners.append(
-            ServiceBanner(port=portid, proto=proto, product=product, version=version, raw=raw)
+            ServiceBanner(
+                port=portid,
+                proto=proto,
+                product=product,
+                version=version,
+                raw=raw,
+                redirect_locations=redirect_locations,
+            )
         )
 
     return _surface_from_banners(host, banners)
@@ -176,7 +200,83 @@ def _surface_from_banners(host: str, banners: list[ServiceBanner]) -> Surface:
         open_ports=tuple(sorted({b.port for b in banners})),
         services=tuple(banners),
         tech=tuple(sorted(tech_set)),
+        vhosts=_vhosts_from_locations(
+            host, (location for b in banners for location in b.redirect_locations)
+        ),
     )
+
+
+def _extract_redirect_locations(text: str) -> tuple[str, ...]:
+    lowered = text.lower()
+    if "redirect" not in lowered and "location" not in lowered:
+        return ()
+    locations: list[str] = []
+    for match in _REDIRECT_URL_RE.finditer(text):
+        location = match.group(0).rstrip(".,;")
+        if location not in locations:
+            locations.append(location)
+    return tuple(locations)
+
+
+def _nmap_redirect_locations(
+    port_el: ET.Element,
+    svc_el: ET.Element | None,
+) -> tuple[str, ...]:
+    texts: list[str] = []
+    if svc_el is not None:
+        texts.extend(svc_el.attrib.values())
+    for script_el in port_el.iter("script"):
+        output = script_el.get("output")
+        if output:
+            texts.append(output)
+    for elem_el in port_el.iter("elem"):
+        if elem_el.text:
+            texts.append(elem_el.text)
+
+    locations: list[str] = []
+    for text in texts:
+        for location in _extract_redirect_locations(text):
+            if location not in locations:
+                locations.append(location)
+    return tuple(locations)
+
+
+def _normalize_hostname(host: str) -> str:
+    normalized = host.strip().rstrip(".").lower()
+    if normalized.startswith("[") and normalized.endswith("]"):
+        return normalized[1:-1]
+    return normalized
+
+
+def _vhost_from_location(location: str, target_host: str) -> str | None:
+    parsed = urlparse(location.strip())
+    hostname = parsed.hostname
+    if hostname is None:
+        return None
+    vhost = _normalize_hostname(hostname)
+    if not vhost or vhost == _normalize_hostname(target_host):
+        return None
+    return vhost
+
+
+def _vhosts_from_locations(target_host: str, locations: Iterable[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    vhosts: list[str] = []
+    for location in locations:
+        vhost = _vhost_from_location(location, target_host)
+        if vhost is None or vhost in seen:
+            continue
+        seen.add(vhost)
+        vhosts.append(vhost)
+    return tuple(vhosts)
+
+
+def _surface_with_additional_vhosts(surface: Surface, vhosts: Iterable[str]) -> Surface:
+    combined: list[str] = []
+    for vhost in (*surface.vhosts, *vhosts):
+        if vhost not in combined:
+            combined.append(vhost)
+    return replace(surface, vhosts=tuple(combined))
 
 
 # ── TCP connect fallback ───────────────────────────────────────────────────
@@ -266,12 +366,22 @@ def _fallback_ports(ports: str, target_port: int | None) -> list[int]:
     return sorted(selected)
 
 
+def _new_http_connection(host: str, port: int) -> http.client.HTTPConnection:
+    if port in {443, 8443}:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        return http.client.HTTPSConnection(host, port, timeout=1.0, context=context)
+    return http.client.HTTPConnection(host, port, timeout=1.0)
+
+
 def _http_service_banner(host: str, port: int) -> ServiceBanner | None:
-    conn = http.client.HTTPConnection(host, port, timeout=1.0)
+    conn = _new_http_connection(host, port)
     try:
         conn.request("GET", "/")
         response = conn.getresponse()
         server = response.getheader("Server", "")
+        location = response.getheader("Location", "") if 300 <= response.status < 400 else ""
         response.read()
     except (OSError, http.client.HTTPException):
         return None
@@ -279,7 +389,14 @@ def _http_service_banner(host: str, port: int) -> ServiceBanner | None:
         conn.close()
     product, version = _split_server_header(server)
     raw = " ".join(part for part in (product, version) if part).strip()
-    return ServiceBanner(port=port, proto="tcp", product=product, version=version, raw=raw)
+    return ServiceBanner(
+        port=port,
+        proto="tcp",
+        product=product,
+        version=version,
+        raw=raw,
+        redirect_locations=(location,) if location else (),
+    )
 
 
 def _split_server_header(server: str) -> tuple[str, str]:
@@ -301,6 +418,24 @@ def _fallback_surface(host: str, ports: str = "top", target_port: int | None = N
             banner or ServiceBanner(port=port, proto="tcp", product="", version="", raw="")
         )
     return _surface_from_banners(host, banners)
+
+
+def _looks_http_service(service: ServiceBanner) -> bool:
+    key = f"{service.product} {service.raw}".lower()
+    return service.port in _HTTP_REDIRECT_PORTS or any(
+        marker in key for marker in ("http", "nginx", "apache", "iis", "tomcat", "caddy")
+    )
+
+
+def _probe_http_vhosts(surface: Surface) -> Surface:
+    locations: list[str] = []
+    for service in surface.services:
+        if not _looks_http_service(service):
+            continue
+        banner = _http_service_banner(surface.host, service.port)
+        if banner is not None:
+            locations.extend(banner.redirect_locations)
+    return _surface_with_additional_vhosts(surface, _vhosts_from_locations(surface.host, locations))
 
 
 # ── public API ────────────────────────────────────────────────────────────
@@ -347,7 +482,13 @@ def detect_surface(
     try:
         result = exec_env.run(argv, timeout=float(timeout))
         if result.returncode == 0 and result.stdout.strip():
-            return _parse_nmap_xml(result.stdout, host=host)
+            surface = _parse_nmap_xml(result.stdout, host=host)
+            # Enrich vhosts with a direct HTTP redirect probe. nmap -sV only
+            # notes a redirect sometimes; the probe catches the common
+            # IP->vhost 301 (e.g. HTB boxes) regardless. Best-effort: it uses
+            # short timeouts and never raises, so it is safe on the nmap-success
+            # path too — not just the fallback.
+            return _probe_http_vhosts(surface)
     except Exception:
         pass
 

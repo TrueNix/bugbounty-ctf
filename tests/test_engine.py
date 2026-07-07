@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 import responses
 
+import bugbounty_ctf.engine as engine
 from bugbounty_ctf.engine import ScannerDB, SecurityScanner, derive_base_url
 
 
@@ -54,6 +56,36 @@ class TestSecurityScannerInit:
     def test_custom_header_set_on_session(self) -> None:
         scanner = SecurityScanner("http://target/", headers={"Host": "enigma.htb"})
         assert scanner.session.headers["Host"] == "enigma.htb"
+
+    def test_scanner_verify_param_sets_session_verify(self) -> None:
+        strict = SecurityScanner("https://target/", verify=True)
+        lenient = SecurityScanner("https://target/", verify=False)
+
+        assert strict.verify is True
+        assert strict.session.verify is True
+        assert lenient.verify is False
+        assert lenient.session.verify is False
+
+    def test_scanner_defaults_documented(self) -> None:
+        scanner = SecurityScanner("https://target/")
+
+        assert scanner.verify is False
+        assert scanner.session.verify is False
+        assert "verify=False" in (SecurityScanner.__init__.__doc__ or "")
+
+    def test_scanner_verify_false_suppresses_insecure_warning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        suppressed: list[type[Any]] = []
+
+        def fake_disable_warnings(category: type[Any]) -> None:
+            suppressed.append(category)
+
+        monkeypatch.setattr(engine.urllib3, "disable_warnings", fake_disable_warnings)
+
+        SecurityScanner("https://target/", verify=False)
+
+        assert suppressed == [engine.urllib3.exceptions.InsecureRequestWarning]
 
     @responses.activate
     def test_custom_header_sent_on_request(self) -> None:

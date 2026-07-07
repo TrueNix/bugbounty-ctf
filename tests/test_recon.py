@@ -94,6 +94,23 @@ NMAP_XML_NO_VERSIONS = """\
 </nmaprun>
 """
 
+NMAP_XML_REDIRECT = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<nmaprun scanner="nmap" xmloutputversion="1.05">
+  <host>
+    <status state="up" reason="echo-reply"/>
+    <address addr="10.129.43.132" addrtype="ipv4"/>
+    <ports>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack"/>
+        <service name="https" product="nginx" version="1.22.0"
+                 servicefp="Did not follow redirect to https://fireflow.htb/"/>
+      </port>
+    </ports>
+  </host>
+</nmaprun>
+"""
+
 
 # ---------------------------------------------------------------------------
 # Fake ExecEnv — never touches docker/kalibox
@@ -258,6 +275,110 @@ class TestSurfaceServiceVersions:
             {"product": "nginx", "version": "1.22.0"},
             {"product": "Apache httpd", "version": "2.4.56"},
         ]
+
+
+class TestVhostRedirectCapture:
+    def test_surface_captures_vhost_from_redirect(self, monkeypatch: Any) -> None:
+        from bugbounty_ctf import recon
+
+        class RedirectResponse:
+            status = 301
+
+            def getheader(self, name: str, default: str = "") -> str:
+                headers = {"Server": "nginx/1.22.0", "Location": "https://fireflow.htb/"}
+                return headers.get(name, default)
+
+            def read(self) -> bytes:
+                return b""
+
+        class RedirectConnection:
+            def __init__(self, host: str, port: int, timeout: float, **kwargs: Any) -> None:
+                self.host = host
+                self.port = port
+                self.timeout = timeout
+
+            def request(self, method: str, path: str) -> None:
+                assert method == "GET"
+                assert path == "/"
+
+            def getresponse(self) -> RedirectResponse:
+                return RedirectResponse()
+
+            def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(recon, "_tcp_connect_scan", lambda *args, **kwargs: [443])
+        monkeypatch.setattr(recon.http.client, "HTTPConnection", RedirectConnection)
+        monkeypatch.setattr(recon.http.client, "HTTPSConnection", RedirectConnection)
+
+        surface = recon.detect_surface("10.129.43.132:443", ports="443", env=SpyEnv())
+
+        assert surface.vhosts == ("fireflow.htb",)
+
+    def test_surface_no_vhost_when_no_redirect(self, monkeypatch: Any) -> None:
+        from bugbounty_ctf import recon
+
+        class OkResponse:
+            status = 200
+
+            def getheader(self, name: str, default: str = "") -> str:
+                return "nginx/1.22.0" if name == "Server" else default
+
+            def read(self) -> bytes:
+                return b""
+
+        class OkConnection:
+            def __init__(self, host: str, port: int, timeout: float, **kwargs: Any) -> None:
+                self.host = host
+                self.port = port
+                self.timeout = timeout
+
+            def request(self, method: str, path: str) -> None:
+                assert method == "GET"
+                assert path == "/"
+
+            def getresponse(self) -> OkResponse:
+                return OkResponse()
+
+            def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(recon, "_tcp_connect_scan", lambda *args, **kwargs: [80])
+        monkeypatch.setattr(recon.http.client, "HTTPConnection", OkConnection)
+
+        surface = recon.detect_surface("10.129.43.132:80", ports="80", env=SpyEnv())
+
+        assert surface.vhosts == ()
+
+    def test_vhost_dedup_and_excludes_target_host(self) -> None:
+        from bugbounty_ctf.recon import ServiceBanner, _surface_from_banners
+
+        surface = _surface_from_banners(
+            "10.129.43.132",
+            [
+                ServiceBanner(
+                    443,
+                    "tcp",
+                    "nginx",
+                    "1.22.0",
+                    "nginx 1.22.0",
+                    (
+                        "https://10.129.43.132/",
+                        "https://fireflow.htb/",
+                        "https://FireFlow.HTB./",
+                    ),
+                ),
+            ],
+        )
+
+        assert surface.vhosts == ("fireflow.htb",)
+
+    def test_parse_nmap_xml_extracts_vhost_from_redirect_note(self) -> None:
+        from bugbounty_ctf.recon import _parse_nmap_xml
+
+        surface = _parse_nmap_xml(NMAP_XML_REDIRECT, host="10.129.43.132")
+
+        assert surface.vhosts == ("fireflow.htb",)
 
 
 class TestFallbackTcpConnect:
