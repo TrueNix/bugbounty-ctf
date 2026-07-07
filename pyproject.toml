@@ -86,6 +86,7 @@ python_functions = ["test_*"]
 markers = [
     "unit: unit tests with mocked HTTP",
     "integration: tests that hit real endpoints (deselect by default)",
+    "slow: slower smoke or end-to-end tests that still pass in the default run",
 ]
 
 [tool.coverage.run]
