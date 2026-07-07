@@ -30,7 +30,8 @@ def main() -> int:
         print(f"[!] {CONFIG} not found — is Hermes installed?")
         return 1
 
-    text = open(CONFIG).read()
+    with open(CONFIG) as f:
+        text = f.read()
     already = SCRIPT in text
 
     if remove:
