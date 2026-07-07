@@ -32,7 +32,9 @@ def _stub_dns(monkeypatch: pytest.MonkeyPatch, resolved: frozenset[str] | None =
     monkeypatch.setattr(socket, "gethostbyname", gethostbyname)
 
 
-def _stub_run_cmd(monkeypatch: pytest.MonkeyPatch, results: Mapping[tuple[str, ...], RunResult]) -> None:
+def _stub_run_cmd(
+    monkeypatch: pytest.MonkeyPatch, results: Mapping[tuple[str, ...], RunResult]
+) -> None:
     def fake_run_cmd(cmd: list[str], timeout: int = 30) -> RunResult:
         return results.get(tuple(cmd), ("", "", -1))
 
@@ -76,7 +78,9 @@ def test_subdomain_enum_dedupes_crt_and_stubbed_dns(monkeypatch: pytest.MonkeyPa
 
 
 @responses.activate
-def test_subdomain_enum_returns_empty_when_sources_are_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_subdomain_enum_returns_empty_when_sources_are_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _stub_dns(monkeypatch)
     responses.add(responses.GET, _crt_url(), json=[], status=200)
     toolkit = OSINTToolkit()
@@ -98,6 +102,7 @@ def test_google_dorks_builds_expected_queries_and_finding() -> None:
     finding = toolkit.get_findings()[0]
     assert finding["source"] == "google_dorks"
     assert finding["details"]["dorks"] == dorks
+
 
 @responses.activate
 def test_wayback_lookup_parses_snapshots_and_records_interesting_urls() -> None:
@@ -126,7 +131,9 @@ def test_wayback_lookup_parses_snapshots_and_records_interesting_urls() -> None:
 
 @responses.activate
 def test_wayback_lookup_returns_empty_for_malformed_json() -> None:
-    responses.add(responses.GET, _wayback_url(), body="not json", content_type="application/json", status=200)
+    responses.add(
+        responses.GET, _wayback_url(), body="not json", content_type="application/json", status=200
+    )
     toolkit = OSINTToolkit()
 
     assert toolkit.wayback_lookup(DOMAIN) == []
@@ -140,7 +147,11 @@ def test_dns_enum_populates_records_and_flags(monkeypatch: pytest.MonkeyPatch) -
             ("dig", "+short", "A", DOMAIN): ("203.0.113.10\n", "", 0),
             ("dig", "+short", "MX", DOMAIN): ("10 mail.example.test.\n", "", 0),
             ("dig", "+short", "NS", DOMAIN): ("ns1.example.test.\nns2.example.test.\n", "", 0),
-            ("dig", "+short", "TXT", DOMAIN): ('"v=spf1 include:_spf.example.test"\n"CTF{dns_flag}"\n', "", 0),
+            ("dig", "+short", "TXT", DOMAIN): (
+                '"v=spf1 include:_spf.example.test"\n"CTF{dns_flag}"\n',
+                "",
+                0,
+            ),
         },
     )
     toolkit = OSINTToolkit()

@@ -37,7 +37,10 @@ def install_run_cmd_stub(
 
 @pytest.mark.parametrize(
     ("text", "expected"),
-    [("noise HTB{one} flag{two} repeated HTB{one}", {"HTB{one}", "flag{two}"}), ("plain text", set())],
+    [
+        ("noise HTB{one} flag{two} repeated HTB{one}", {"HTB{one}", "flag{two}"}),
+        ("plain text", set()),
+    ],
 )
 def test_extract_flags_returns_unique_matches(text: str, expected: set[str]) -> None:
     assert set(_extract_flags(text)) == expected
@@ -68,7 +71,11 @@ def test_file_info_parses_elf_amd64_metadata(binary: str, monkeypatch: pytest.Mo
 def test_file_info_handles_empty_tool_output(binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
     install_run_cmd_stub(monkeypatch, {("file", binary): ("", "", -1)})
 
-    assert ReverseToolkit(binary).file_info() == {"format": "unknown", "arch": "unknown", "info": ""}
+    assert ReverseToolkit(binary).file_info() == {
+        "format": "unknown",
+        "arch": "unknown",
+        "info": "",
+    }
 
 
 @pytest.mark.parametrize(
@@ -78,7 +85,10 @@ def test_file_info_handles_empty_tool_output(binary: str, monkeypatch: pytest.Mo
             "Full RELRO\nCanary found\nNX enabled\nPIE enabled\nFORTIFY enabled",
             {"nx": True, "pie": True, "canary": True, "relro": True, "fortify": True},
         ),
-        ("[NOT FOUND]", {"nx": False, "pie": False, "canary": False, "relro": False, "fortify": False}),
+        (
+            "[NOT FOUND]",
+            {"nx": False, "pie": False, "canary": False, "relro": False, "fortify": False},
+        ),
     ],
 )
 def test_checksec_parses_protections_and_missing_tool(
@@ -96,7 +106,9 @@ def test_strings_analysis_returns_interesting_strings_and_flags(
     binary: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    output = "\n".join(["password=hunter2", "https://target.test/admin", "gets(", "flag{strings-win}"])
+    output = "\n".join(
+        ["password=hunter2", "https://target.test/admin", "gets(", "flag{strings-win}"]
+    )
     install_run_cmd_stub(monkeypatch, {("strings", "-n", "4", binary): (output, "", 0)})
     toolkit = ReverseToolkit(binary)
 
@@ -124,7 +136,11 @@ def test_symbol_analysis_categorizes_nm_functions_variables_and_imports(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     output = "\n".join(
-        ["0000000000001139 T main", "0000000000004010 D global_counter", "                 U puts@GLIBC_2.2.5"]
+        [
+            "0000000000001139 T main",
+            "0000000000004010 D global_counter",
+            "                 U puts@GLIBC_2.2.5",
+        ]
     )
     install_run_cmd_stub(monkeypatch, {("nm", binary): (output, "", 0)})
 
@@ -141,7 +157,11 @@ def test_symbol_analysis_returns_empty_categories_for_stripped_binary(
 ) -> None:
     install_run_cmd_stub(monkeypatch, {("nm", binary): ("", "", 1)})
 
-    assert ReverseToolkit(binary).symbol_analysis() == {"functions": [], "variables": [], "imports": []}
+    assert ReverseToolkit(binary).symbol_analysis() == {
+        "functions": [],
+        "variables": [],
+        "imports": [],
+    }
 
 
 def test_radare2_analysis_collects_functions_imports_and_crypto_hits(
@@ -151,9 +171,17 @@ def test_radare2_analysis_collects_functions_imports_and_crypto_hits(
     install_run_cmd_stub(
         monkeypatch,
         {
-            ("r2", "-q", "-c", "aaa; afl", binary): ("0x1000 12 sym.main\n0x1010 5 sym.win\n", "", 0),
+            ("r2", "-q", "-c", "aaa; afl", binary): (
+                "0x1000 12 sym.main\n0x1010 5 sym.win\n",
+                "",
+                0,
+            ),
             ("r2", "-q", "-c", "ii", binary): ("imp.puts\nimp.system\n", "", 0),
-            ("r2", "-q", "-c", "/x 67452301; /x 0123456789ABCDEF", binary): ("0x2000 hit0_0 67452301\n", "", 0),
+            ("r2", "-q", "-c", "/x 67452301; /x 0123456789ABCDEF", binary): (
+                "0x2000 hit0_0 67452301\n",
+                "",
+                0,
+            ),
         },
     )
 
@@ -164,15 +192,21 @@ def test_radare2_analysis_collects_functions_imports_and_crypto_hits(
     }
 
 
-def test_radare2_analysis_returns_empty_when_tool_missing(binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_radare2_analysis_returns_empty_when_tool_missing(
+    binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     install_run_cmd_stub(monkeypatch, {}, default=("", "[NOT FOUND]", -1))
 
     assert ReverseToolkit(binary).radare2_analysis() == {}
 
 
-def test_decompile_function_returns_radare2_output(binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_decompile_function_returns_radare2_output(
+    binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     output = "int main(void) { return 0; }\n"
-    install_run_cmd_stub(monkeypatch, {("r2", "-q", "-c", "aaa; s sym.main; pdc", binary): (output, "", 0)})
+    install_run_cmd_stub(
+        monkeypatch, {("r2", "-q", "-c", "aaa; s sym.main; pdc", binary): (output, "", 0)}
+    )
     toolkit = ReverseToolkit(binary)
 
     assert toolkit.decompile_function("main") == output
@@ -226,7 +260,9 @@ def test_ghidra_decompile_returns_headless_output(
     assert toolkit.get_results()["findings"][0]["tool"] == "ghidra"
 
 
-def test_ghidra_decompile_returns_empty_when_home_missing(binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ghidra_decompile_returns_empty_when_home_missing(
+    binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.delenv("GHIDRA_HOME", raising=False)
     calls = install_run_cmd_stub(monkeypatch, {})
 
@@ -254,15 +290,21 @@ def test_find_flags_returns_unique_flags_from_strings_and_radare2(
     assert ("strings", binary) in calls
 
 
-def test_find_flags_returns_empty_when_no_patterns_match(binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_find_flags_returns_empty_when_no_patterns_match(
+    binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     install_run_cmd_stub(monkeypatch, {}, default=("", "", 0))
 
     assert ReverseToolkit(binary).find_flags() == []
 
 
-def test_disassemble_function_returns_radare2_output(binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_disassemble_function_returns_radare2_output(
+    binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     output = "pdf output for main\n"
-    install_run_cmd_stub(monkeypatch, {("r2", "-q", "-c", "aaa; s sym.main; pdf", binary): (output, "", 0)})
+    install_run_cmd_stub(
+        monkeypatch, {("r2", "-q", "-c", "aaa; s sym.main; pdf", binary): (output, "", 0)}
+    )
 
     assert ReverseToolkit(binary).disassemble_function("main") == output
 
@@ -271,10 +313,15 @@ def test_disassemble_function_falls_back_to_objdump_section(
     binary: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    objdump = "\n".join(["0000000000001139 <main>:", "  1139:\t55\tpush %rbp", "  113a:\tc3\tret", ""])
+    objdump = "\n".join(
+        ["0000000000001139 <main>:", "  1139:\t55\tpush %rbp", "  113a:\tc3\tret", ""]
+    )
     install_run_cmd_stub(
         monkeypatch,
-        {("r2", "-q", "-c", "aaa; s sym.main; pdf", binary): ("", "", -1), ("objdump", "-d", binary): (objdump, "", 0)},
+        {
+            ("r2", "-q", "-c", "aaa; s sym.main; pdf", binary): ("", "", -1),
+            ("objdump", "-d", binary): (objdump, "", 0),
+        },
     )
 
     assert ReverseToolkit(binary).disassemble_function("main") == (
@@ -282,7 +329,9 @@ def test_disassemble_function_falls_back_to_objdump_section(
     )
 
 
-def test_disassemble_function_returns_empty_when_tools_missing(binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_disassemble_function_returns_empty_when_tools_missing(
+    binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     install_run_cmd_stub(monkeypatch, {}, default=("", "[NOT FOUND]", -1))
 
     assert ReverseToolkit(binary).disassemble_function("main") == ""
@@ -299,11 +348,17 @@ def test_disassemble_function_validates_symbol_before_running_tool(
     assert calls == []
 
 
-def test_analyze_runs_tools_and_returns_results_shape(binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_analyze_runs_tools_and_returns_results_shape(
+    binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     install_run_cmd_stub(
         monkeypatch,
         {
-            ("file", binary): (f"{binary}: ELF 64-bit LSB executable, x86-64, dynamically linked", "", 0),
+            ("file", binary): (
+                f"{binary}: ELF 64-bit LSB executable, x86-64, dynamically linked",
+                "",
+                0,
+            ),
             ("checksec", f"--file={binary}"): ("NX enabled\nPIE enabled", "", 0),
             ("strings", "-n", "4", binary): ("token=abc\nCTF{from_analyze}", "", 0),
             ("nm", binary): ("0000000000001139 T main", "", 0),
@@ -328,4 +383,9 @@ def test_analyze_returns_empty_dict_for_missing_binary(tmp_path: Path) -> None:
 
 
 def test_get_results_returns_empty_collections_before_analysis(binary: str) -> None:
-    assert ReverseToolkit(binary).get_results() == {"findings": [], "flags": [], "arch": "unknown", "format": "unknown"}
+    assert ReverseToolkit(binary).get_results() == {
+        "findings": [],
+        "flags": [],
+        "arch": "unknown",
+        "format": "unknown",
+    }

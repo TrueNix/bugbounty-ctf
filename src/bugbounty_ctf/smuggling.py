@@ -233,9 +233,7 @@ class SmugglingDetector:
 
         if _response_anomaly(attack_response) or _response_anomaly(probe_response):
             result.vulnerable = True
-            result.evidence = (
-                "CL.TE request caused response anomaly after smuggled prefix was sent"
-            )
+            result.evidence = "CL.TE request caused response anomaly after smuggled prefix was sent"
         elif self._timing_desync(elapsed):
             result.vulnerable = True
             result.timing_diff = elapsed
@@ -262,9 +260,7 @@ class SmugglingDetector:
 
         if _response_anomaly(attack_response) or _response_anomaly(probe_response):
             result.vulnerable = True
-            result.evidence = (
-                "TE.CL request caused response anomaly after smuggled prefix was sent"
-            )
+            result.evidence = "TE.CL request caused response anomaly after smuggled prefix was sent"
         elif self._timing_desync(elapsed):
             result.vulnerable = True
             result.timing_diff = elapsed

@@ -108,7 +108,9 @@ def refresh_cve_db(options: RefreshOptions) -> RefreshSummary:
     )
 
 
-def _tracked_products(database: Mapping[str, Sequence[CveEntry]], extra_products: Sequence[str]) -> list[str]:
+def _tracked_products(
+    database: Mapping[str, Sequence[CveEntry]], extra_products: Sequence[str]
+) -> list[str]:
     products = {product.lower() for product in database}
     products.update(product.lower() for product in extra_products)
     return sorted(products)
@@ -186,7 +188,9 @@ def _parse_entries(path: Path, product: str, raw_entries: Sequence[JsonValue]) -
     return entries
 
 
-def _write_cve_db(path: Path, comment: str | None, database: Mapping[str, Sequence[CveEntry]]) -> None:
+def _write_cve_db(
+    path: Path, comment: str | None, database: Mapping[str, Sequence[CveEntry]]
+) -> None:
     payload: dict[str, str | list[CveEntry]] = {}
     if comment is not None:
         payload["_comment"] = comment

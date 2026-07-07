@@ -108,7 +108,11 @@ def test_binwalk_records_embedded_files_without_extracting(
             case "binwalk":
                 if "-e" in cmd:
                     return "", "", 0
-                return "DECIMAL       HEXADECIMAL     DESCRIPTION\n128           0x80            PNG image\n", "", 0
+                return (
+                    "DECIMAL       HEXADECIMAL     DESCRIPTION\n128           0x80            PNG image\n",
+                    "",
+                    0,
+                )
             case _:
                 return missing_tool(cmd, timeout)
 

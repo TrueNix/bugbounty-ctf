@@ -69,16 +69,59 @@ class SSRFPivot:
     """
 
     DEFAULT_PORTS: ClassVar[list[int]] = [
-        21, 22, 25, 80, 443, 445, 1433, 1521, 2375, 2376, 3000, 3306, 4000,
-        5000, 5432, 5601, 5985, 6379, 8000, 8080, 8443, 9000, 9090, 9091,
-        9200, 9300, 11211, 27017,
+        21,
+        22,
+        25,
+        80,
+        443,
+        445,
+        1433,
+        1521,
+        2375,
+        2376,
+        3000,
+        3306,
+        4000,
+        5000,
+        5432,
+        5601,
+        5985,
+        6379,
+        8000,
+        8080,
+        8443,
+        9000,
+        9090,
+        9091,
+        9200,
+        9300,
+        11211,
+        27017,
     ]
 
     COMMON_PATHS: ClassVar[list[str]] = [
-        "/", "/admin", "/api", "/api/v1", "/api/v1/health", "/health", "/status",
-        "/info", "/config", "/env", "/debug", "/metrics", "/.env", "/flag",
-        "/flag.txt", "/console", "/actuator", "/actuator/env", "/swagger",
-        "/swagger.json", "/openapi.json", "/v2/_catalog",
+        "/",
+        "/admin",
+        "/api",
+        "/api/v1",
+        "/api/v1/health",
+        "/health",
+        "/status",
+        "/info",
+        "/config",
+        "/env",
+        "/debug",
+        "/metrics",
+        "/.env",
+        "/flag",
+        "/flag.txt",
+        "/console",
+        "/actuator",
+        "/actuator/env",
+        "/swagger",
+        "/swagger.json",
+        "/openapi.json",
+        "/v2/_catalog",
     ]
 
     TECH_HINT_MARKERS: ClassVar[dict[str, str]] = {
@@ -157,7 +200,9 @@ class SSRFPivot:
 
     @staticmethod
     def _is_open_content(content: str | None) -> TypeGuard[str]:
-        return bool(content and "Could not fetch" not in content and "Security policy" not in content)
+        return bool(
+            content and "Could not fetch" not in content and "Security policy" not in content
+        )
 
     @staticmethod
     def _is_fingerprint_content(content: str | None) -> TypeGuard[str]:
@@ -310,7 +355,9 @@ class SSRFPivot:
     @staticmethod
     def _extract_flags(text: str) -> list[str]:
         """Extract flag patterns from text."""
-        return [flag for pattern in FLAG_PATTERNS for flag in re.findall(pattern, text, re.IGNORECASE)]
+        return [
+            flag for pattern in FLAG_PATTERNS for flag in re.findall(pattern, text, re.IGNORECASE)
+        ]
 
     def get_results(self) -> list[dict[str, Any]]:
         """Return all discovered services as dicts."""

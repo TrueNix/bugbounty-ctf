@@ -218,7 +218,9 @@ class TestJwtAttacks:
 
         responses.add_callback(responses.GET, "http://target/admin", callback=callback)
 
-        result = run_jwt_attacks("http://target/profile", token, verify_endpoint="http://target/admin")
+        result = run_jwt_attacks(
+            "http://target/profile", token, verify_endpoint="http://target/admin"
+        )
 
         assert result["decoded"]["payload"]["sub"] == "user-1"
         assert seen_algs[0] == "none"
@@ -230,7 +232,9 @@ class TestJwtAttacks:
         token = advanced.forge_jwt_hs256({"sub": "user-1", "role": "user"}, "strong-secret")
         responses.add(responses.GET, "http://target/admin", body="unauthorized", status=401)
 
-        result = run_jwt_attacks("http://target/profile", token, verify_endpoint="http://target/admin")
+        result = run_jwt_attacks(
+            "http://target/profile", token, verify_endpoint="http://target/admin"
+        )
 
         assert result["none_accepted"] is False
         assert result["hs256_empty_accepted"] is False
@@ -257,7 +261,9 @@ class TestFileUpload:
 
     @responses.activate
     def test_rejected_uploads_are_clean(self) -> None:
-        responses.add(responses.POST, "http://target/upload", body='{"error":"rejected"}', status=400)
+        responses.add(
+            responses.POST, "http://target/upload", body='{"error":"rejected"}', status=400
+        )
 
         results = run_file_upload("http://target/upload")
 
@@ -297,9 +303,7 @@ class TestGraphqlHelpers:
                         "__type": {
                             "name": "AdminSecret",
                             "kind": "OBJECT",
-                            "fields": [
-                                {"name": "flag", "type": {"name": "String"}, "args": []}
-                            ],
+                            "fields": [{"name": "flag", "type": {"name": "String"}, "args": []}],
                             "inputFields": [],
                             "enumValues": [],
                         }

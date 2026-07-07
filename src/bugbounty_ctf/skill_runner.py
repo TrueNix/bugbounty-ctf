@@ -1065,6 +1065,7 @@ class SkillOrchestrator:
         if ports is None and tech is None and autodetect and self.target_url:
             try:
                 from bugbounty_ctf.recon import detect_surface
+
                 host = self.target_url.split("://", 1)[-1].split("/")[0].rsplit(":", 1)[0]
                 if host:
                     surface = detect_surface(host)

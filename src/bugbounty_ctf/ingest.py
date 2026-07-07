@@ -87,7 +87,13 @@ def ingest_writeups(
                 response = feed_fetcher(feed_url)
                 response.raise_for_status()
                 entries = _parse_feed(feed_url, response.text)
-            except (ET.ParseError, OSError, TimeoutError, ValueError, requests.RequestException) as exc:
+            except (
+                ET.ParseError,
+                OSError,
+                TimeoutError,
+                ValueError,
+                requests.RequestException,
+            ) as exc:
                 logger.warning("skipping feed %s: %s", feed_url, exc)
                 continue
 

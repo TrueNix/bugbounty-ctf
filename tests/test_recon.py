@@ -99,6 +99,7 @@ NMAP_XML_NO_VERSIONS = """\
 # Fake ExecEnv — never touches docker/kalibox
 # ---------------------------------------------------------------------------
 
+
 class SpyEnv:
     """ExecEnv spy: records argv calls and returns canned XML output.
 
@@ -123,6 +124,7 @@ class SpyEnv:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestNmapXmlParsing:
     """Test 1: XML fixture → correct ports / services / versions."""

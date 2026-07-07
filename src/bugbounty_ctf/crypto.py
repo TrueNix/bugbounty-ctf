@@ -259,8 +259,9 @@ class CryptoToolkit:
             print(f"[FLAG] {flags}")
         return result
 
-    def rsa_fermat(self, n: int, e: int = 65537, c: int | None = None,
-                   max_iterations: int = 1_000_000) -> CryptoResult:
+    def rsa_fermat(
+        self, n: int, e: int = 65537, c: int | None = None, max_iterations: int = 1_000_000
+    ) -> CryptoResult:
         """Fermat factorization: factor n when p and q are close together.
 
         Writes n = a^2 - b^2 = (a-b)(a+b) by scanning a upward from

@@ -86,6 +86,7 @@ _DEAD_END_PREFIX = "dead-end::"
 
 # ── dataclasses ────────────────────────────────────────────────────────────
 
+
 @dataclass(frozen=True)
 class ServiceBanner:
     """One open port and its version banner."""
@@ -120,6 +121,7 @@ class Surface:
 
 # ── XML parser ────────────────────────────────────────────────────────────
 
+
 def _parse_nmap_xml(xml_text: str, *, host: str) -> Surface:
     """Parse ``nmap -oX`` XML output into a :class:`Surface`.
 
@@ -148,7 +150,9 @@ def _parse_nmap_xml(xml_text: str, *, host: str) -> Surface:
         version = svc_el.get("version", "")
         extra = svc_el.get("extrainfo", "")
         raw = " ".join(p for p in (product, version, extra) if p).strip()
-        banners.append(ServiceBanner(port=portid, proto=proto, product=product, version=version, raw=raw))
+        banners.append(
+            ServiceBanner(port=portid, proto=proto, product=product, version=version, raw=raw)
+        )
 
     return _surface_from_banners(host, banners)
 
@@ -176,6 +180,7 @@ def _surface_from_banners(host: str, banners: list[ServiceBanner]) -> Surface:
 
 
 # ── TCP connect fallback ───────────────────────────────────────────────────
+
 
 def _tcp_connect_scan(
     host: str,
@@ -292,11 +297,14 @@ def _fallback_surface(host: str, ports: str = "top", target_port: int | None = N
     banners: list[ServiceBanner] = []
     for port in open_ports:
         banner = _http_service_banner(host, port)
-        banners.append(banner or ServiceBanner(port=port, proto="tcp", product="", version="", raw=""))
+        banners.append(
+            banner or ServiceBanner(port=port, proto="tcp", product="", version="", raw="")
+        )
     return _surface_from_banners(host, banners)
 
 
 # ── public API ────────────────────────────────────────────────────────────
+
 
 def detect_surface(
     target: str,
@@ -368,6 +376,7 @@ def _extract_host(target: str) -> str:
 
 # ── Part B: dead-end feedback ─────────────────────────────────────────────
 
+
 def record_dead_end(
     kb: KnowledgeBase,
     *,
@@ -414,7 +423,7 @@ def list_dead_ends(
         fname = lesson.get("filename", "")
         if not fname.startswith(full_prefix):
             continue
-        suffix = fname[len(full_prefix):]
+        suffix = fname[len(full_prefix) :]
         parts = suffix.split("::", 1)
         le_host = parts[0] if parts else ""
         track_id = parts[1] if len(parts) > 1 else ""

@@ -30,9 +30,7 @@ def http_response(
 ) -> bytes:
     encoded = body.encode()
     return (
-        f"HTTP/1.1 {status} {reason}\r\n"
-        f"Content-Length: {len(encoded)}\r\n"
-        f"\r\n"
+        f"HTTP/1.1 {status} {reason}\r\nContent-Length: {len(encoded)}\r\n\r\n"
     ).encode() + encoded
 
 
