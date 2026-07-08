@@ -646,64 +646,55 @@ class SkillOrchestrator:
         return response
 
     @staticmethod
-    def _build_agent_prompt(guidance: PhaseGuidance) -> str:
-        """Build a prompt for the Hermes sub-agent from phase guidance."""
-        lines = [
-            f"You are a security testing agent for the {guidance.phase} phase.",
+    def _render_memory_preamble() -> list[str]:
+        return [
+            "## MEMORY DISCIPLINE (MANDATORY)",
+            "Before trying ANY technique: list_dead_ends(host) — skip recorded dead-ends.",
+            "After any failure: record_dead_end(host, track_id, reason).",
+            "NEVER repeat a command that already failed. Pivot.",
+            "",
         ]
-        lines.insert(0, "## MEMORY DISCIPLINE (MANDATORY)")
-        lines.insert(
-            1, "Before trying ANY technique: list_dead_ends(host) — skip recorded dead-ends."
-        )
-        lines.insert(2, "After any failure: record_dead_end(host, track_id, reason).")
-        lines.insert(3, "NEVER repeat a command that already failed. Pivot.")
-        lines.insert(4, "")
 
-        if guidance.target_url:
-            # Share the orchestrator's persistence so findings written here are
-            # visible to the next phase and to the final report.
-            lines.extend(
-                [
-                    "",
-                    "## Bootstrap (use this exact scanner — it shares state with the orchestrator)",
-                    "```python",
-                    "from bugbounty_ctf import SecurityScanner",
-                    "from bugbounty_ctf.engine import ScannerDB",
-                    "from bugbounty_ctf import api  # test_*, detect_defenses, get_aws_credentials…",
-                    "scanner = SecurityScanner(",
-                    f"    {guidance.target_url!r},",
-                    f"    state_file={guidance.state_file!r},",
-                    f"    db=ScannerDB({guidance.db_path!r}),",
-                    ")",
-                    "```",
-                    "Run the tools against `scanner` so every finding is persisted automatically.",
-                ]
-            )
+    @staticmethod
+    def _render_target_info(guidance: PhaseGuidance) -> list[str]:
+        if not guidance.target_url:
+            return []
+        return [
+            "",
+            "## Bootstrap (use this exact scanner — it shares state with the orchestrator)",
+            "```python",
+            "from bugbounty_ctf import SecurityScanner",
+            "from bugbounty_ctf.engine import ScannerDB",
+            "from bugbounty_ctf import api  # test_*, detect_defenses, get_aws_credentials…",
+            "scanner = SecurityScanner(",
+            f"    {guidance.target_url!r},",
+            f"    state_file={guidance.state_file!r},",
+            f"    db=ScannerDB({guidance.db_path!r}),",
+            ")",
+            "```",
+            "Run the tools against `scanner` so every finding is persisted automatically.",
+        ]
 
-        lines.extend(
-            [
-                "",
-                "## Discovered so far",
-                render_json(guidance.discovered, maxlen=1000),
-                "",
-                "## Available tools",
-            ]
-        )
-
+    @staticmethod
+    def _render_available_tools(guidance: PhaseGuidance) -> list[str]:
+        lines = [
+            "",
+            "## Discovered so far",
+            render_json(guidance.discovered, maxlen=1000),
+            "",
+            "## Available tools",
+        ]
         for tool in guidance.available_tools:
             lines.append(f"  - {tool}")
-
         if guidance.rag_context:
             lines.extend(["", "## Methodology from knowledge base", guidance.rag_context[:500]])
-
         if guidance.scanner_state:
             lines.extend(["", "## Current scanner state", guidance.scanner_state])
+        return lines
 
-        # Proven, transferable playbook FIRST — above per-host prior memory — so
-        # the agent reads the generalized plan that won on a same-shaped box and
-        # tries it before re-deriving. Top 1-2 only (don't flood). Every leaf is
-        # funneled through render() (defense-in-depth: patterns are secret-free,
-        # but this is the same valve the other recall blocks use).
+    @staticmethod
+    def _render_proven_patterns(guidance: PhaseGuidance) -> list[str]:
+        lines: list[str] = []
         for pattern in guidance.recalled_patterns[:2]:
             steps = pattern.get("steps", [])
             if not isinstance(steps, list) or not steps:
@@ -732,106 +723,136 @@ class SkillOrchestrator:
                     "target-specific data. Adapt each step to THIS target.",
                 ]
             )
+        return lines
 
-        if guidance.prior_memory:
-            lines.extend(["", "## Prior memory (confirmed on this host in past runs)"])
-            for m in guidance.prior_memory[:15]:
-                lines.append(
-                    f"  - {render(m.get('vuln_type', '?'))} @ "
-                    f"{render(m.get('endpoint', '?'))}"
-                    f" (payload: {render(m.get('payload', ''), maxlen=60)})"
+    @staticmethod
+    def _render_prior_memory(guidance: PhaseGuidance) -> list[str]:
+        if not guidance.prior_memory:
+            return []
+        lines = ["", "## Prior memory (confirmed on this host in past runs)"]
+        for memory in guidance.prior_memory[:15]:
+            lines.append(
+                f"  - {render(memory.get('vuln_type', '?'))} @ "
+                f"{render(memory.get('endpoint', '?'))}"
+                f" (payload: {render(memory.get('payload', ''), maxlen=60)})"
+            )
+        lines.append("Re-check these first; they are known weak points.")
+        return lines
+
+    @staticmethod
+    def _render_prior_hypotheses(guidance: PhaseGuidance) -> list[str]:
+        if not guidance.prior_hypotheses:
+            return []
+        confirmed = [h for h in guidance.prior_hypotheses if h.get("status") == "confirmed"]
+        rejected = [h for h in guidance.prior_hypotheses if h.get("status") == "rejected"]
+        lines = ["", "## Prior hypotheses (past runs)"]
+        if confirmed:
+            lines.append(
+                "  confirmed (re-check): "
+                + ", ".join(f"{render(h['vuln_type'])}@{render(h['param'])}" for h in confirmed[:8])
+            )
+        if rejected:
+            lines.append(
+                "  rejected (skip — already ruled out): "
+                + ", ".join(f"{render(h['vuln_type'])}@{render(h['param'])}" for h in rejected[:8])
+            )
+        return lines
+
+    @staticmethod
+    def _render_dead_ends(guidance: PhaseGuidance) -> list[str]:
+        stop_lines: list[str] = []
+        advisory_track_ids: list[str] = []
+        for dead_end in guidance.prior_dead_ends[:15]:
+            track_id = str(dead_end.get("track_id", ""))
+            if not track_id:
+                continue
+            raw_failures = dead_end.get("consecutive_failures", 0)
+            try:
+                failures = int(raw_failures)
+            except (TypeError, ValueError):
+                failures = 0
+            rendered_track_id = render(track_id)
+            if failures >= guidance.dead_end_threshold:
+                stop_lines.append(
+                    f"  - STOP: '{rendered_track_id}' has failed {failures} "
+                    "consecutive times identically on this host — do NOT retry "
+                    "this technique. Pivot to a different attack surface."
                 )
-            lines.append("Re-check these first; they are known weak points.")
+            else:
+                advisory_track_ids.append(rendered_track_id)
+        if not stop_lines and not advisory_track_ids:
+            return []
+        lines = [
+            "",
+            "## Known dead-ends on this host (deprioritize — no findings in past runs)",
+            *stop_lines,
+        ]
+        if advisory_track_ids:
+            lines.append("  - " + ", ".join(advisory_track_ids))
+        lines.append("Re-test only if the surface changed (new port/service since last run).")
+        return lines
 
-        if guidance.prior_hypotheses:
-            confirmed = [h for h in guidance.prior_hypotheses if h.get("status") == "confirmed"]
-            rejected = [h for h in guidance.prior_hypotheses if h.get("status") == "rejected"]
-            lines.extend(["", "## Prior hypotheses (past runs)"])
-            if confirmed:
-                lines.append(
-                    "  confirmed (re-check): "
-                    + ", ".join(
-                        f"{render(h['vuln_type'])}@{render(h['param'])}" for h in confirmed[:8]
-                    )
-                )
-            if rejected:
-                lines.append(
-                    "  rejected (skip — already ruled out): "
-                    + ", ".join(
-                        f"{render(h['vuln_type'])}@{render(h['param'])}" for h in rejected[:8]
-                    )
-                )
+    @staticmethod
+    def _render_prior_observations(guidance: PhaseGuidance) -> list[str]:
+        if not guidance.prior_observations:
+            return []
+        lines = ["", "## Prior observations — suggested next tests"]
+        for observation in guidance.prior_observations[:8]:
+            hint = render(observation.get("next_test", ""), maxlen=80)
+            lines.append(
+                f"  - {render(observation.get('vuln_type', '?'))} @ "
+                f"{render(observation.get('endpoint', '?'))}: {hint}"
+            )
+        return lines
 
-        if guidance.prior_dead_ends:
-            stop_lines: list[str] = []
-            advisory_track_ids: list[str] = []
-            for d in guidance.prior_dead_ends[:15]:
-                track_id = str(d.get("track_id", ""))
-                if not track_id:
-                    continue
-                raw_failures = d.get("consecutive_failures", 0)
-                try:
-                    failures = int(raw_failures)
-                except (TypeError, ValueError):
-                    failures = 0
-                rendered_track_id = render(track_id)
-                if failures >= guidance.dead_end_threshold:
-                    stop_lines.append(
-                        f"  - STOP: '{rendered_track_id}' has failed {failures} "
-                        "consecutive times identically on this host — do NOT retry "
-                        "this technique. Pivot to a different attack surface."
-                    )
-                else:
-                    advisory_track_ids.append(rendered_track_id)
-            if stop_lines or advisory_track_ids:
-                lines.extend(
-                    [
-                        "",
-                        "## Known dead-ends on this host (deprioritize — no findings in past runs)",
-                    ]
-                )
-                lines.extend(stop_lines)
-                if advisory_track_ids:
-                    lines.append("  - " + ", ".join(advisory_track_ids))
-                lines.append(
-                    "Re-test only if the surface changed (new port/service since last run)."
-                )
+    @staticmethod
+    def _render_previous_findings(guidance: PhaseGuidance) -> list[str]:
+        if not guidance.previous_findings:
+            return []
+        lines = ["", "## Previous findings"]
+        for finding in guidance.previous_findings[:10]:
+            lines.append(
+                f"  - {render(finding.get('type', '?'))}: {render(finding.get('endpoint', '?'))}"
+            )
+        return lines
 
-        if guidance.prior_observations:
-            lines.extend(["", "## Prior observations — suggested next tests"])
-            for o in guidance.prior_observations[:8]:
-                hint = render(o.get("next_test", ""), maxlen=80)
-                lines.append(
-                    f"  - {render(o.get('vuln_type', '?'))} @ "
-                    f"{render(o.get('endpoint', '?'))}: {hint}"
-                )
+    @staticmethod
+    def _render_task_contract(guidance: PhaseGuidance) -> list[str]:
+        return [
+            "",
+            "## Your task",
+            f"Execute the {guidance.phase} phase. Use the available tools against `scanner`.",
+            "",
+            "## Required output",
+            "End your reply with a machine-readable findings block — a JSON array",
+            f"wrapped in <{SkillOrchestrator.FINDINGS_TAG}> … </{SkillOrchestrator.FINDINGS_TAG}> tags.",
+            "Each finding object must have: type, endpoint, method, payload, evidence,",
+            'confidence (one of "low"/"medium"/"high"), and source (the methodology',
+            "doc or reasoning that led to it). Emit an empty array if nothing was",
+            "found. Example:",
+            f"<{SkillOrchestrator.FINDINGS_TAG}>",
+            '[{"type":"sqli","endpoint":"/login","method":"POST",'
+            '"payload":"\' OR 1=1--","evidence":"SQL error reflected",'
+            '"confidence":"high","source":"sqlite-php-sqli-playbook.md"}]',
+            f"</{SkillOrchestrator.FINDINGS_TAG}>",
+        ]
 
-        if guidance.previous_findings:
-            lines.extend(["", "## Previous findings"])
-            for f in guidance.previous_findings[:10]:
-                lines.append(f"  - {render(f.get('type', '?'))}: {render(f.get('endpoint', '?'))}")
-
-        lines.extend(
-            [
-                "",
-                "## Your task",
-                f"Execute the {guidance.phase} phase. Use the available tools against `scanner`.",
-                "",
-                "## Required output",
-                "End your reply with a machine-readable findings block — a JSON array",
-                f"wrapped in <{SkillOrchestrator.FINDINGS_TAG}> … </{SkillOrchestrator.FINDINGS_TAG}> tags.",
-                "Each finding object must have: type, endpoint, method, payload, evidence,",
-                'confidence (one of "low"/"medium"/"high"), and source (the methodology',
-                "doc or reasoning that led to it). Emit an empty array if nothing was",
-                "found. Example:",
-                f"<{SkillOrchestrator.FINDINGS_TAG}>",
-                '[{"type":"sqli","endpoint":"/login","method":"POST",'
-                '"payload":"\' OR 1=1--","evidence":"SQL error reflected",'
-                '"confidence":"high","source":"sqlite-php-sqli-playbook.md"}]',
-                f"</{SkillOrchestrator.FINDINGS_TAG}>",
-            ]
-        )
-
+    @staticmethod
+    def _build_agent_prompt(guidance: PhaseGuidance) -> str:
+        """Build a prompt for the Hermes sub-agent from phase guidance."""
+        lines = [
+            *SkillOrchestrator._render_memory_preamble(),
+            f"You are a security testing agent for the {guidance.phase} phase.",
+            *SkillOrchestrator._render_target_info(guidance),
+            *SkillOrchestrator._render_available_tools(guidance),
+            *SkillOrchestrator._render_proven_patterns(guidance),
+            *SkillOrchestrator._render_prior_memory(guidance),
+            *SkillOrchestrator._render_prior_hypotheses(guidance),
+            *SkillOrchestrator._render_dead_ends(guidance),
+            *SkillOrchestrator._render_prior_observations(guidance),
+            *SkillOrchestrator._render_previous_findings(guidance),
+            *SkillOrchestrator._render_task_contract(guidance),
+        ]
         return "\n".join(lines)
 
     @staticmethod

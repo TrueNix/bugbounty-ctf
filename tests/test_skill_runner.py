@@ -58,6 +58,45 @@ def _runner_with_real_kb(tmp_path: Path) -> SkillOrchestrator:
     return SkillOrchestrator("http://target.test/", scanner=scanner, knowledge_base=kb)
 
 
+def _comprehensive_prompt_guidance() -> PhaseGuidance:
+    return PhaseGuidance(
+        phase="fuzz",
+        discovered={"forms": [{"action": "/login", "method": "POST"}], "links": ["/admin"]},
+        available_tools=["scanner.scan_endpoint(url)", "test_xss(url, scanner=scanner)"],
+        rag_context="methodology line 1\nmethodology line 2",
+        scanner_state="target: http://target.test\nfindings: 1",
+        previous_findings=[{"type": "sqli", "endpoint": "/login"}],
+        prior_memory=[{"vuln_type": "xss", "endpoint": "/q", "payload": "<svg>"}],
+        prior_hypotheses=[
+            {"vuln_type": "sqli", "param": "id", "status": "confirmed"},
+            {"vuln_type": "idor", "param": "user", "status": "rejected"},
+        ],
+        prior_dead_ends=[
+            {"track_id": "mail", "consecutive_failures": 1},
+            {"track_id": "web", "consecutive_failures": 3},
+        ],
+        prior_observations=[
+            {"vuln_type": "lfi", "endpoint": "/file", "next_test": "read /etc/passwd"}
+        ],
+        dead_end_threshold=3,
+        recalled_patterns=[
+            {
+                "confidence": 0.87,
+                "worked": 2,
+                "applied": 3,
+                "capabilities": ["web_app", "smtp_open"],
+                "steps": [
+                    {"technique": "web_content_discovery", "rationale": "map content first"},
+                    {"technique": "sqli_dump_creds", "rationale": "reuse creds"},
+                ],
+            }
+        ],
+        target_url="http://target.test",
+        state_file="/tmp/state.json",
+        db_path="/tmp/findings.db",
+    )
+
+
 class TestGuidance:
     def test_each_phase_returns_its_guidance(self, runner: SkillOrchestrator) -> None:
         assert runner.get_recon_guidance().phase == "recon"
@@ -77,6 +116,154 @@ class TestGuidance:
 
 
 class TestPromptBuilding:
+    def test_build_agent_prompt_matches_captured_full_output(self) -> None:
+        guidance = _comprehensive_prompt_guidance()
+        expected = "\n".join(
+            [
+                "## MEMORY DISCIPLINE (MANDATORY)",
+                "Before trying ANY technique: list_dead_ends(host) — skip recorded dead-ends.",
+                "After any failure: record_dead_end(host, track_id, reason).",
+                "NEVER repeat a command that already failed. Pivot.",
+                "",
+                "You are a security testing agent for the fuzz phase.",
+                "",
+                "## Bootstrap (use this exact scanner — it shares state with the orchestrator)",
+                "```python",
+                "from bugbounty_ctf import SecurityScanner",
+                "from bugbounty_ctf.engine import ScannerDB",
+                "from bugbounty_ctf import api  # test_*, detect_defenses, get_aws_credentials…",
+                "scanner = SecurityScanner(",
+                "    'http://target.test',",
+                "    state_file='/tmp/state.json',",
+                "    db=ScannerDB('/tmp/findings.db'),",
+                ")",
+                "```",
+                "Run the tools against `scanner` so every finding is persisted automatically.",
+                "",
+                "## Discovered so far",
+                "{",
+                '  "forms": [',
+                "    {",
+                '      "action": "/login",',
+                '      "method": "POST"',
+                "    }",
+                "  ],",
+                '  "links": [',
+                '    "/admin"',
+                "  ]",
+                "}",
+                "",
+                "## Available tools",
+                "  - scanner.scan_endpoint(url)",
+                "  - test_xss(url, scanner=scanner)",
+                "",
+                "## Methodology from knowledge base",
+                "methodology line 1\nmethodology line 2",
+                "",
+                "## Current scanner state",
+                "target: http://target.test\nfindings: 1",
+                "",
+                "## Proven attack pattern for this surface (confidence 0.87, worked 2/3)",
+                "Surface match: web_app + smtp_open",
+                "Try this sequence FIRST, before re-deriving from scratch:",
+                "  1. web_content_discovery  — map content first",
+                "  2. sqli_dump_creds  — reuse creds",
+                "This is a generalized technique sequence from prior engagements, NOT",
+                "target-specific data. Adapt each step to THIS target.",
+                "",
+                "## Prior memory (confirmed on this host in past runs)",
+                "  - xss @ /q (payload: <svg>)",
+                "Re-check these first; they are known weak points.",
+                "",
+                "## Prior hypotheses (past runs)",
+                "  confirmed (re-check): sqli@id",
+                "  rejected (skip — already ruled out): idor@user",
+                "",
+                "## Known dead-ends on this host (deprioritize — no findings in past runs)",
+                "  - STOP: 'web' has failed 3 consecutive times identically on this host — do NOT retry this technique. Pivot to a different attack surface.",
+                "  - mail",
+                "Re-test only if the surface changed (new port/service since last run).",
+                "",
+                "## Prior observations — suggested next tests",
+                "  - lfi @ /file: read /etc/passwd",
+                "",
+                "## Previous findings",
+                "  - sqli: /login",
+                "",
+                "## Your task",
+                "Execute the fuzz phase. Use the available tools against `scanner`.",
+                "",
+                "## Required output",
+                "End your reply with a machine-readable findings block — a JSON array",
+                "wrapped in <FINDINGS> … </FINDINGS> tags.",
+                "Each finding object must have: type, endpoint, method, payload, evidence,",
+                'confidence (one of "low"/"medium"/"high"), and source (the methodology',
+                "doc or reasoning that led to it). Emit an empty array if nothing was",
+                "found. Example:",
+                "<FINDINGS>",
+                '[{"type":"sqli","endpoint":"/login","method":"POST","payload":"\' OR 1=1--","evidence":"SQL error reflected","confidence":"high","source":"sqlite-php-sqli-playbook.md"}]',
+                "</FINDINGS>",
+            ]
+        )
+
+        assert SkillOrchestrator._build_agent_prompt(guidance) == expected
+
+    def test_private_renderers_return_focused_prompt_sections(self) -> None:
+        guidance = _comprehensive_prompt_guidance()
+
+        assert SkillOrchestrator._render_memory_preamble() == [
+            "## MEMORY DISCIPLINE (MANDATORY)",
+            "Before trying ANY technique: list_dead_ends(host) — skip recorded dead-ends.",
+            "After any failure: record_dead_end(host, track_id, reason).",
+            "NEVER repeat a command that already failed. Pivot.",
+            "",
+        ]
+        assert SkillOrchestrator._render_target_info(guidance)[:3] == [
+            "",
+            "## Bootstrap (use this exact scanner — it shares state with the orchestrator)",
+            "```python",
+        ]
+        assert SkillOrchestrator._render_target_info(PhaseGuidance(phase="fuzz")) == []
+        available_tools = SkillOrchestrator._render_available_tools(guidance)
+        assert available_tools[:2] == ["", "## Discovered so far"]
+        assert available_tools[2].startswith("{\n")
+        assert available_tools[4:] == [
+            "## Available tools",
+            "  - scanner.scan_endpoint(url)",
+            "  - test_xss(url, scanner=scanner)",
+            "",
+            "## Methodology from knowledge base",
+            "methodology line 1\nmethodology line 2",
+            "",
+            "## Current scanner state",
+            "target: http://target.test\nfindings: 1",
+        ]
+        assert SkillOrchestrator._render_proven_patterns(guidance)[:4] == [
+            "",
+            "## Proven attack pattern for this surface (confidence 0.87, worked 2/3)",
+            "Surface match: web_app + smtp_open",
+            "Try this sequence FIRST, before re-deriving from scratch:",
+        ]
+        assert SkillOrchestrator._render_prior_memory(guidance) == [
+            "",
+            "## Prior memory (confirmed on this host in past runs)",
+            "  - xss @ /q (payload: <svg>)",
+            "Re-check these first; they are known weak points.",
+        ]
+        assert SkillOrchestrator._render_prior_hypotheses(guidance) == [
+            "",
+            "## Prior hypotheses (past runs)",
+            "  confirmed (re-check): sqli@id",
+            "  rejected (skip — already ruled out): idor@user",
+        ]
+        assert SkillOrchestrator._render_dead_ends(guidance) == [
+            "",
+            "## Known dead-ends on this host (deprioritize — no findings in past runs)",
+            "  - STOP: 'web' has failed 3 consecutive times identically on this host — do NOT retry this technique. Pivot to a different attack surface.",
+            "  - mail",
+            "Re-test only if the surface changed (new port/service since last run).",
+        ]
+
     def test_guidance_includes_memory_discipline_preamble(self) -> None:
         guidance = PhaseGuidance(phase="recon")
         prompt = SkillOrchestrator._build_agent_prompt(guidance)
