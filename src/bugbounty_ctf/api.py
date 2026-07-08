@@ -92,7 +92,9 @@ from bugbounty_ctf.recon import (
     Surface,
     clear_dead_end,
     detect_surface,
+    get_consecutive_failures,
     list_dead_ends,
+    list_hot_dead_ends,
     record_dead_end,
 )
 from bugbounty_ctf.reverse import ReverseToolkit
@@ -187,6 +189,7 @@ __all__ = [
     "generate_report",
     "generate_ssrf_bypass_ips",
     "get_aws_credentials",
+    "get_consecutive_failures",
     "graphql_field_dump",
     "graphql_introspection",
     "handle_failure",
@@ -196,6 +199,7 @@ __all__ = [
     "ip_to_octal",
     "known_cves",
     "list_dead_ends",
+    "list_hot_dead_ends",
     "load_cve_db",
     "load_templates",
     "load_tracks",

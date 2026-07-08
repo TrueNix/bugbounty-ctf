@@ -35,6 +35,7 @@ Usage::
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import re
 import socket
@@ -57,7 +58,9 @@ __all__ = [
     "_tcp_connect_scan",
     "clear_dead_end",
     "detect_surface",
+    "get_consecutive_failures",
     "list_dead_ends",
+    "list_hot_dead_ends",
     "record_dead_end",
 ]
 
@@ -85,6 +88,7 @@ _PRODUCT_TO_TECH: list[tuple[str, str]] = [
 
 # Dead-end key prefix — mirrors the learned:: convention in KnowledgeBase.
 _DEAD_END_PREFIX = "dead-end::"
+_DEAD_END_FAILURE_PREFIX = "dead-end-failures::"
 _REDIRECT_URL_RE = re.compile(r"https?://[^\s\"'<>),]+")
 _HTTP_REDIRECT_PORTS = {80, 443, 8000, 8080, 8443}
 
@@ -518,6 +522,70 @@ def _extract_host(target: str) -> str:
 # ── Part B: dead-end feedback ─────────────────────────────────────────────
 
 
+def _dead_end_failure_filename(kb: KnowledgeBase, *, host: str, track_id: str) -> str:
+    return f"{kb.LESSON_PREFIX}{_DEAD_END_FAILURE_PREFIX}{host}::{track_id}"
+
+
+def get_consecutive_failures(
+    kb: KnowledgeBase,
+    *,
+    host: str,
+    track_id: str,
+) -> int:
+    """Return consecutive dead-end records for ``track_id`` on ``host``."""
+    filename = _dead_end_failure_filename(kb, host=host, track_id=track_id)
+    row = kb.conn.execute(
+        "SELECT content FROM docs WHERE filename = ? ORDER BY indexed_at DESC, id DESC LIMIT 1",
+        (filename,),
+    ).fetchone()
+    if row is None:
+        return 0
+    try:
+        return max(0, int(str(row["content"]).strip()))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _write_consecutive_failures(
+    kb: KnowledgeBase,
+    *,
+    host: str,
+    track_id: str,
+    failures: int,
+) -> None:
+    filename = _dead_end_failure_filename(kb, host=host, track_id=track_id)
+    kb.conn.execute("DELETE FROM docs WHERE filename = ?", (filename,))
+    kb.conn.execute(
+        """
+        INSERT INTO docs (filename, section, content, tags, indexed_at)
+        VALUES (?, ?, ?, ?, datetime('now'))
+        """,
+        (
+            filename,
+            f"dead-end failures: {track_id} on {host}",
+            str(max(0, failures)),
+            "dead-end,failures",
+        ),
+    )
+    kb.conn.commit()
+
+
+def _increment_consecutive_failures(
+    kb: KnowledgeBase,
+    *,
+    host: str,
+    track_id: str,
+) -> None:
+    failures = get_consecutive_failures(kb, host=host, track_id=track_id) + 1
+    _write_consecutive_failures(kb, host=host, track_id=track_id, failures=failures)
+
+
+def _reset_consecutive_failures(kb: KnowledgeBase, *, host: str, track_id: str) -> None:
+    filename = _dead_end_failure_filename(kb, host=host, track_id=track_id)
+    kb.conn.execute("DELETE FROM docs WHERE filename = ?", (filename,))
+    kb.conn.commit()
+
+
 def record_dead_end(
     kb: KnowledgeBase,
     *,
@@ -531,6 +599,8 @@ def record_dead_end(
     deprioritize it.  Returns ``False`` if an identical record already exists
     (de-duplicated by ``KnowledgeBase.add_lesson``).
     """
+    with contextlib.suppress(Exception):
+        _increment_consecutive_failures(kb, host=host, track_id=track_id)
     title = f"dead-end: {track_id} on {host}"
     body = f"Track '{track_id}' produced no findings on {host}. {reason}".strip()
     key = f"{_DEAD_END_PREFIX}{host}::{track_id}"
@@ -543,6 +613,8 @@ def clear_dead_end(
     host: str,
     track_id: str,
 ) -> bool:
+    with contextlib.suppress(Exception):
+        _reset_consecutive_failures(kb, host=host, track_id=track_id)
     filename = f"{kb.LESSON_PREFIX}{_DEAD_END_PREFIX}{host}::{track_id}"
     cursor = kb.conn.execute("DELETE FROM docs WHERE filename = ?", (filename,))
     kb.conn.commit()
@@ -579,3 +651,22 @@ def list_dead_ends(
             }
         )
     return results
+
+
+def list_hot_dead_ends(
+    kb: KnowledgeBase,
+    *,
+    host: str,
+    threshold: int = 3,
+) -> list[dict[str, Any]]:
+    hot: list[dict[str, Any]] = []
+    for dead_end in list_dead_ends(kb, host=host):
+        track_id = str(dead_end.get("track_id", ""))
+        if not track_id:
+            continue
+        failures = get_consecutive_failures(kb, host=host, track_id=track_id)
+        if failures >= threshold:
+            entry = dict(dead_end)
+            entry["consecutive_failures"] = failures
+            hot.append(entry)
+    return hot

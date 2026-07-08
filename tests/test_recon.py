@@ -498,6 +498,46 @@ class TestDeadEndFeedback:
         assert clear_dead_end(kb, host="10.10.10.5", track_id="mail")
         assert list_dead_ends(kb, host="10.10.10.5") == []
 
+    def test_consecutive_failure_counter_increments_on_record_resets_on_clear(
+        self, tmp_path: Any
+    ) -> None:
+        from bugbounty_ctf.knowledge import KnowledgeBase
+        from bugbounty_ctf.recon import (
+            clear_dead_end,
+            get_consecutive_failures,
+            record_dead_end,
+        )
+
+        kb = KnowledgeBase(db_path=str(tmp_path / "test.db"), references_dir=str(tmp_path))
+
+        record_dead_end(kb, host="10.10.10.5", track_id="web", reason="spdy failed")
+        record_dead_end(kb, host="10.10.10.5", track_id="web", reason="spdy failed")
+        record_dead_end(kb, host="10.10.10.6", track_id="web", reason="spdy failed")
+
+        assert get_consecutive_failures(kb, host="10.10.10.5", track_id="web") == 2
+        assert get_consecutive_failures(kb, host="10.10.10.6", track_id="web") == 1
+
+        clear_dead_end(kb, host="10.10.10.5", track_id="web")
+
+        assert get_consecutive_failures(kb, host="10.10.10.5", track_id="web") == 0
+        assert get_consecutive_failures(kb, host="10.10.10.6", track_id="web") == 1
+
+    def test_hot_dead_ends_filtered_at_threshold(self, tmp_path: Any) -> None:
+        from bugbounty_ctf.knowledge import KnowledgeBase
+        from bugbounty_ctf.recon import list_hot_dead_ends, record_dead_end
+
+        kb = KnowledgeBase(db_path=str(tmp_path / "test.db"), references_dir=str(tmp_path))
+        for _ in range(3):
+            record_dead_end(kb, host="10.10.10.5", track_id="web", reason="spdy failed")
+        record_dead_end(kb, host="10.10.10.5", track_id="mail", reason="no auth")
+        for _ in range(3):
+            record_dead_end(kb, host="10.10.10.6", track_id="web", reason="spdy failed")
+
+        hot = list_hot_dead_ends(kb, host="10.10.10.5", threshold=3)
+
+        assert [entry["track_id"] for entry in hot] == ["web"]
+        assert hot[0]["consecutive_failures"] == 3
+
     def test_clear_is_idempotent(self, tmp_path: Any) -> None:
         from bugbounty_ctf.knowledge import KnowledgeBase
         from bugbounty_ctf.recon import clear_dead_end
@@ -513,6 +553,12 @@ def test_recon_dead_end_entrypoints_import_cleanly() -> None:
     recon = importlib.import_module("bugbounty_ctf.recon")
     api = importlib.import_module("bugbounty_ctf.api")
 
-    for name in ("detect_surface", "record_dead_end", "clear_dead_end"):
+    for name in (
+        "detect_surface",
+        "record_dead_end",
+        "clear_dead_end",
+        "get_consecutive_failures",
+        "list_hot_dead_ends",
+    ):
         assert callable(getattr(recon, name))
         assert callable(getattr(api, name))

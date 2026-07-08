@@ -251,6 +251,23 @@ class TestSecondBrain:
         assert "smb" in prompt
         assert "Re-test only if the surface changed" in prompt
 
+    def test_guidance_emits_STOP_for_hot_dead_ends(self, tmp_path: Path) -> None:
+        from bugbounty_ctf.recon import record_dead_end
+
+        orch = _runner_with_real_kb(tmp_path)
+        for _ in range(orch.max_consecutive_failures):
+            record_dead_end(orch.kb, host=orch.scanner.host, track_id="web", reason="spdy failed")
+        record_dead_end(orch.kb, host=orch.scanner.host, track_id="mail", reason="no auth")
+
+        guidance = orch.get_recon_guidance()
+        prompt = SkillOrchestrator._build_agent_prompt(guidance)
+
+        failures = {d["track_id"]: d["consecutive_failures"] for d in guidance.prior_dead_ends}
+        assert failures == {"web": orch.max_consecutive_failures, "mail": 1}
+        assert "STOP: 'web' has failed 3 consecutive times identically on this host" in prompt
+        assert "do NOT retry this technique" in prompt
+        assert "STOP: 'mail'" not in prompt
+
 
 class TestStructuredOutput:
     def test_parse_findings_extracts_array(self) -> None:
@@ -603,6 +620,41 @@ class TestFanOut:
         assert result["dead_ends_recorded"] == 0
         assert result["dead_ends_cleared"] == 1
         assert list_dead_ends(orch.kb, host=orch.scanner.host) == []
+
+    def test_fan_out_drops_track_at_consecutive_failure_threshold(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        orch = _runner_with_real_kb(tmp_path)
+        calls: list[str] = []
+
+        def fake_run(prompt: str, *, timeout: int, label: str = "agent") -> str:
+            calls.append(label)
+            return "<FINDINGS>[]</FINDINGS>"
+
+        monkeypatch.setattr(orch, "_run_hermes", fake_run)
+        for _ in range(orch.max_consecutive_failures):
+            result = orch.fan_out([("web", "retry kubelet spdy exec")])
+            assert result["suppressed"] == []
+
+        calls.clear()
+        result = orch.fan_out([("web", "retry kubelet spdy exec")])
+        output = capsys.readouterr().out
+
+        assert calls == []
+        assert result["responses"] == {}
+        assert result["suppressed"] == [
+            {
+                "track_id": "web",
+                "consecutive_failures": orch.max_consecutive_failures,
+                "reason": "dead-end hot",
+            }
+        ]
+        assert (
+            "[fan-out] DROPPING track 'web' — 3 consecutive identical failures (dead-end hot)"
+        ) in output
 
 
 def _track(track_id: str, *, parallel_safe: bool = True, capability: str = "web_app") -> Any:
