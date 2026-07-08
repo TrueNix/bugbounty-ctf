@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 import requests
 
+from bugbounty_ctf.extractor import IoCExtractor, format_extraction_summary
 from bugbounty_ctf.knowledge import KnowledgeBase
 
 FEEDS: Final[list[str]] = [
@@ -76,6 +77,8 @@ def ingest_writeups(
     fetcher: FeedFetcher | None = None,
     limit: int = DEFAULT_LIMIT,
     retention_cap: int | None = None,
+    *,
+    extract_iocs: bool = False,
 ) -> IngestSummary:
     feed_urls = list(feeds) if feeds is not None else list(FEEDS)
     feed_fetcher = fetcher if fetcher is not None else _default_fetcher
@@ -113,6 +116,13 @@ def ingest_writeups(
                 summary["fetched"] += 1
                 if added:
                     summary["added"] += 1
+                    if extract_iocs:
+                        _add_ioc_summary(
+                            store,
+                            title=title,
+                            body=body,
+                            key=f"{_feed_host(feed_url)}:{key}",
+                        )
                 else:
                     summary["skipped_duplicates"] += 1
     finally:
@@ -125,6 +135,8 @@ def ingest_writeups(
 def ingest_attack_techniques(
     kb: KnowledgeBase,
     fetcher: FeedFetcher | None = None,
+    *,
+    extract_iocs: bool = False,
 ) -> IngestSummary:
     feed_fetcher = fetcher if fetcher is not None else _default_fetcher
     summary = IngestSummary(feeds=len(MITRE_FEEDS), fetched=0, added=0, skipped_duplicates=0)
@@ -156,6 +168,13 @@ def ingest_attack_techniques(
             summary["fetched"] += 1
             if added:
                 summary["added"] += 1
+                if extract_iocs:
+                    _add_ioc_summary(
+                        kb,
+                        title=title,
+                        body=body,
+                        key=f"attack:{technique_id}",
+                    )
             else:
                 summary["skipped_duplicates"] += 1
 
@@ -165,6 +184,20 @@ def ingest_attack_techniques(
 def _default_fetcher(url: str) -> FeedResponse:
     response: FeedResponse = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
     return response
+
+
+def _add_ioc_summary(kb: KnowledgeBase, *, title: str, body: str, key: str) -> None:
+    findings = IoCExtractor().extract(body, source=key)
+    summary_body = format_extraction_summary(findings)
+    if not summary_body:
+        return
+    kb.add_reference(
+        source="iocs",
+        title=f"IoCs for {title}",
+        body=summary_body,
+        tags="ioc,ingested",
+        key=key,
+    )
 
 
 def _parse_feed(feed_url: str, xml_text: str) -> list[FeedEntry]:

@@ -33,6 +33,7 @@ pdf = ["pymupdf>=1.24"]
 pwn = ["pwntools>=4.10"]
 yaml = ["pyyaml>=6.0"]
 embed = ["sentence-transformers>=2.0"]
+ner = ["spacy>=3.7"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
