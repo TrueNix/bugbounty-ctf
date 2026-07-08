@@ -29,6 +29,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+pdf = ["pymupdf>=1.24"]
 pwn = ["pwntools>=4.10"]
 yaml = ["pyyaml>=6.0"]
 dev = [
