@@ -334,6 +334,170 @@ def _default_state_file(base_url: str) -> str:
     return os.path.expanduser(f"~/.hermes/state/{safe_host}.json")
 
 
+def _create_findings_table(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS findings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target_host TEXT NOT NULL,
+            endpoint TEXT NOT NULL,
+            method TEXT,
+            payload TEXT,
+            vuln_type TEXT,
+            confidence REAL DEFAULT 0.0,
+            indicators TEXT DEFAULT '[]',
+            details TEXT DEFAULT '[]',
+            timestamp TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_findings_host ON findings(target_host);
+        CREATE INDEX IF NOT EXISTS idx_findings_type ON findings(vuln_type);
+    """)
+
+
+def _create_history_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS test_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target_host TEXT NOT NULL,
+            endpoint TEXT NOT NULL,
+            method TEXT,
+            payload TEXT,
+            interesting INTEGER DEFAULT 0,
+            indicators TEXT DEFAULT '[]',
+            timestamp TEXT
+        );
+        CREATE TABLE IF NOT EXISTS attack_surface (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target_host TEXT NOT NULL,
+            start_url TEXT NOT NULL,
+            surface_json TEXT NOT NULL,
+            timestamp TEXT
+        );
+        CREATE TABLE IF NOT EXISTS defenses (
+            target_host TEXT PRIMARY KEY,
+            defenses_json TEXT NOT NULL,
+            timestamp TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_history_host ON test_history(target_host);
+    """)
+
+
+def _create_observations_table(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target_host TEXT NOT NULL,
+            obs_json TEXT NOT NULL,
+            vuln_type TEXT,
+            endpoint TEXT,
+            confidence REAL DEFAULT 0.0,
+            timestamp TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_obs_host ON observations(target_host);
+    """)
+
+
+def _create_hypotheses_table(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS hypotheses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target_host TEXT NOT NULL,
+            vuln_type TEXT,
+            endpoint TEXT,
+            param TEXT,
+            status TEXT,
+            confidence REAL DEFAULT 0.0,
+            hyp_json TEXT NOT NULL,
+            timestamp TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_hyp_host ON hypotheses(target_host);
+    """)
+
+
+def _create_patterns_table(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS patterns (
+            pattern_id TEXT PRIMARY KEY,
+            trigger_json TEXT,
+            steps_json TEXT,
+            outcome TEXT,
+            confidence REAL DEFAULT 0.0,
+            applied INTEGER DEFAULT 0,
+            worked INTEGER DEFAULT 0,
+            failed INTEGER DEFAULT 0,
+            provenance_json TEXT DEFAULT '[]',
+            created_at TEXT,
+            last_seen TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_patterns_outcome ON patterns(outcome);
+    """)
+
+
+def _scan_prepare(
+    url: str,
+    method: str,
+    data: dict[str, str] | None,
+    headers: dict[str, str] | None,
+    cookies: dict[str, str] | None,
+) -> dict[str, Any]:
+    is_post = method.upper() in ("POST", "PUT", "PATCH")
+    test_data = data or {}
+    request_kwargs: dict[str, Any] = {"data": test_data} if is_post else {"params": test_data}
+    if headers is not None:
+        request_kwargs["headers"] = headers
+    if cookies is not None:
+        request_kwargs["cookies"] = cookies
+    test_param = next(iter(test_data.keys())) if test_data else None
+    return {
+        "url": url,
+        "method": method,
+        "is_post": is_post,
+        "test_data": test_data,
+        "request_kwargs": request_kwargs,
+        "test_param": test_param,
+    }
+
+
+def _scan_execute(
+    url: str,
+    method: str,
+    prepared: dict[str, Any],
+    session: SecurityScanner,
+) -> requests.Response:
+    return session._make_request(method, url, **prepared["request_kwargs"])
+
+
+def _scan_analyze(url: str, response: requests.Response, state: dict[str, Any]) -> TestResult:
+    vuln_type = state["vuln_type"]
+    tr = SecurityScanner._to_test_result(state["raw"], vuln_type)
+    is_confirmed = confirm_vulnerability(
+        vuln_type,
+        response.text,
+        state["baseline_text"],
+        state["payload_value"],
+    )
+    result = TestResult(
+        payload=tr.payload,
+        confirmed=is_confirmed,
+        interesting=tr.interesting,
+        indicators=tr.indicators,
+        details=tr.details,
+        status_code=response.status_code,
+        response_length=len(response.text),
+        vuln_type=vuln_type,
+    )
+    scanner = state.get("scanner")
+    if is_confirmed and scanner is not None:
+        scanner._record_finding(
+            url,
+            state["method"],
+            result.payload,
+            result.indicators,
+            result.details,
+            vuln_type,
+        )
+    return result
+
+
 class ScannerDB:
     """SQLite-backed persistence for scanner findings, history, and attack surface."""
 
@@ -354,82 +518,13 @@ class ScannerDB:
         return self._conn
 
     def _init_schema(self) -> None:
-        self.conn.executescript("""
-            CREATE TABLE IF NOT EXISTS findings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                target_host TEXT NOT NULL,
-                endpoint TEXT NOT NULL,
-                method TEXT,
-                payload TEXT,
-                vuln_type TEXT,
-                confidence REAL DEFAULT 0.0,
-                indicators TEXT DEFAULT '[]',
-                details TEXT DEFAULT '[]',
-                timestamp TEXT
-            );
-            CREATE TABLE IF NOT EXISTS test_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                target_host TEXT NOT NULL,
-                endpoint TEXT NOT NULL,
-                method TEXT,
-                payload TEXT,
-                interesting INTEGER DEFAULT 0,
-                indicators TEXT DEFAULT '[]',
-                timestamp TEXT
-            );
-            CREATE TABLE IF NOT EXISTS attack_surface (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                target_host TEXT NOT NULL,
-                start_url TEXT NOT NULL,
-                surface_json TEXT NOT NULL,
-                timestamp TEXT
-            );
-            CREATE TABLE IF NOT EXISTS defenses (
-                target_host TEXT PRIMARY KEY,
-                defenses_json TEXT NOT NULL,
-                timestamp TEXT
-            );
-            CREATE TABLE IF NOT EXISTS observations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                target_host TEXT NOT NULL,
-                obs_json TEXT NOT NULL,
-                vuln_type TEXT,
-                endpoint TEXT,
-                confidence REAL DEFAULT 0.0,
-                timestamp TEXT
-            );
-            CREATE TABLE IF NOT EXISTS hypotheses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                target_host TEXT NOT NULL,
-                vuln_type TEXT,
-                endpoint TEXT,
-                param TEXT,
-                status TEXT,
-                confidence REAL DEFAULT 0.0,
-                hyp_json TEXT NOT NULL,
-                timestamp TEXT
-            );
-            CREATE TABLE IF NOT EXISTS patterns (
-                pattern_id TEXT PRIMARY KEY,
-                trigger_json TEXT,
-                steps_json TEXT,
-                outcome TEXT,
-                confidence REAL DEFAULT 0.0,
-                applied INTEGER DEFAULT 0,
-                worked INTEGER DEFAULT 0,
-                failed INTEGER DEFAULT 0,
-                provenance_json TEXT DEFAULT '[]',
-                created_at TEXT,
-                last_seen TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_findings_host ON findings(target_host);
-            CREATE INDEX IF NOT EXISTS idx_findings_type ON findings(vuln_type);
-            CREATE INDEX IF NOT EXISTS idx_history_host ON test_history(target_host);
-            CREATE INDEX IF NOT EXISTS idx_obs_host ON observations(target_host);
-            CREATE INDEX IF NOT EXISTS idx_hyp_host ON hypotheses(target_host);
-            CREATE INDEX IF NOT EXISTS idx_patterns_outcome ON patterns(outcome);
-        """)
-        self.conn.commit()
+        conn = self.conn
+        _create_findings_table(conn)
+        _create_history_tables(conn)
+        _create_observations_table(conn)
+        _create_hypotheses_table(conn)
+        _create_patterns_table(conn)
+        conn.commit()
         self._migrate()
 
     def _migrate(self) -> None:
@@ -1412,20 +1507,12 @@ class SecurityScanner:
             if defenses.get("waf"):
                 self.waf_detected = True
 
-        is_post = method.upper() in ("POST", "PUT", "PATCH")
-        if is_post:
-            test_data = data or {}
-            kwargs = {"data": test_data}
-        else:
-            test_data = params or {}
-            kwargs = {"params": test_data}
-
-        baseline = self._make_request(method, url, **kwargs)
+        scan_data = data if method.upper() in ("POST", "PUT", "PATCH") else params
+        prepared = _scan_prepare(url, method, scan_data, None, None)
+        baseline = _scan_execute(url, method, prepared, self)
         baseline_text = baseline.text
 
-        test_param: str | None = None
-        if isinstance(test_data, dict) and test_data:
-            test_param = next(iter(test_data.keys()))
+        test_param = prepared["test_param"]
 
         if test_param:
             test_configs = [
@@ -1461,32 +1548,26 @@ class SecurityScanner:
                     tr = self._to_test_result(raw, vuln_type)
 
                     if tr.interesting:
-                        response = self._make_request(
-                            method,
+                        payload_prepared = _scan_prepare(
                             url,
-                            **(
-                                {"data": {test_param: payload_value}}
-                                if is_post
-                                else {"params": {test_param: payload_value}}
-                            ),
+                            method,
+                            {test_param: payload_value},
+                            None,
+                            None,
                         )
-                        is_confirmed = confirm_vulnerability(
-                            vuln_type, response.text, baseline_text, payload_value
+                        response = _scan_execute(url, method, payload_prepared, self)
+                        tr = _scan_analyze(
+                            url,
+                            response,
+                            {
+                                "scanner": self,
+                                "method": method,
+                                "raw": raw,
+                                "baseline_text": baseline_text,
+                                "payload_value": payload_value,
+                                "vuln_type": vuln_type,
+                            },
                         )
-                        tr = TestResult(
-                            payload=tr.payload,
-                            confirmed=is_confirmed,
-                            interesting=tr.interesting,
-                            indicators=tr.indicators,
-                            details=tr.details,
-                            status_code=response.status_code,
-                            response_length=len(response.text),
-                            vuln_type=vuln_type,
-                        )
-                        if is_confirmed:
-                            self._record_finding(
-                                url, method, tr.payload, tr.indicators, tr.details, vuln_type
-                            )
                     confirmed_results.append(tr)
                 results[vuln_type] = confirmed_results
 
