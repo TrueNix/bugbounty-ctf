@@ -51,6 +51,13 @@ from bugbounty_ctf.engine import (
     ip_to_octal,
 )
 from bugbounty_ctf.execenv import ExecEnv, HostEnv, KaliEnv
+from bugbounty_ctf.extractor import (
+    Extraction,
+    IoCExtractor,
+    IoCType,
+    extract_from_kb,
+    summarize_extractions,
+)
 from bugbounty_ctf.failures import FailureType, RequestFailure, handle_failure
 from bugbounty_ctf.flag_hunter import FlagHunter, hunt_flags
 from bugbounty_ctf.forensics import ForensicsToolkit
@@ -131,12 +138,15 @@ __all__ = [
     "CryptoToolkit",
     "DiffAnalysis",
     "ExecEnv",
+    "Extraction",
     "FailureType",
     "FlagHunter",
     "ForensicsToolkit",
     "HostEnv",
     "Hypothesis",
     "HypothesisEngine",
+    "IoCExtractor",
+    "IoCType",
     "KaliBox",
     "KaliEnv",
     "KnowledgeBase",
@@ -189,6 +199,7 @@ __all__ = [
     "ensure_nuclei",
     "enumerate_aws_metadata",
     "exploit_aws_credentials",
+    "extract_from_kb",
     "extract_secrets",
     "find_ssrf_endpoints",
     "forge_jwt_alg_none",
@@ -220,6 +231,7 @@ __all__ = [
     "resolve_entrypoint",
     "save_report",
     "select_tracks",
+    "summarize_extractions",
     "test_blind_rce",
     "test_blind_ssrf",
     "test_blind_xxe",

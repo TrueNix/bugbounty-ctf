@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol, TypedDict
 
+from bugbounty_ctf.extractor import IoCExtractor, format_extraction_summary
 from bugbounty_ctf.knowledge import KnowledgeBase, _split_into_sections
 
 DEFAULT_MAX_CHARS: Final = 2000
@@ -40,6 +41,8 @@ def ingest_files(
     paths: list[Path],
     kb: KnowledgeBase,
     parser: PdfTextParser | None = None,
+    *,
+    extract_iocs: bool = False,
 ) -> IngestSummary:
     summary = IngestSummary(files=len(paths), parsed=0, added=0, skipped_duplicates=0, skipped=0)
 
@@ -60,10 +63,31 @@ def ingest_files(
             )
             if added:
                 summary["added"] += 1
+                if extract_iocs:
+                    _add_ioc_summary(
+                        kb,
+                        title=title,
+                        body=chunk,
+                        key=f"{path.name}:{_stable_key(path, chunk)}",
+                    )
             else:
                 summary["skipped_duplicates"] += 1
 
     return summary
+
+
+def _add_ioc_summary(kb: KnowledgeBase, *, title: str, body: str, key: str) -> None:
+    findings = IoCExtractor().extract(body, source=key)
+    summary_body = format_extraction_summary(findings)
+    if not summary_body:
+        return
+    kb.add_reference(
+        source="iocs",
+        title=f"IoCs for {title}",
+        body=summary_body,
+        tags="ioc,ingested",
+        key=key,
+    )
 
 
 def _extract_pdf_text(
