@@ -169,3 +169,61 @@ def test_ingested_docs_are_searchable(tmp_path: Path) -> None:
 
     assert any(result["filename"].startswith("ingested::") for result in results)
     kb.close()
+
+
+def test_ingest_attack_techniques(tmp_path: Path) -> None:
+    from bugbounty_ctf.ingest import MITRE_FEEDS, ingest_attack_techniques
+
+    attack_json = """
+    {
+      "type": "bundle",
+      "objects": [
+        {
+          "type": "attack-pattern",
+          "id": "attack-pattern--11111111-1111-4111-8111-111111111111",
+          "name": "Command and Scripting Interpreter",
+          "description": "Adversaries may abuse command interpreters for marker_attack_t1059.",
+          "external_references": [
+            {
+              "source_name": "mitre-attack",
+              "external_id": "T1059",
+              "url": "https://attack.mitre.org/techniques/T1059/"
+            }
+          ],
+          "kill_chain_phases": [
+            {
+              "kill_chain_name": "mitre-attack",
+              "phase_name": "execution"
+            },
+            {
+              "kill_chain_name": "mitre-attack",
+              "phase_name": "defense-evasion"
+            }
+          ],
+          "x_mitre_platforms": ["Linux", "Windows"]
+        },
+        {
+          "type": "malware",
+          "name": "Not a technique"
+        }
+      ]
+    }
+    """
+    kb = _kb(tmp_path)
+    fetcher = _fetcher({MITRE_FEEDS[0]: attack_json})
+
+    first = ingest_attack_techniques(kb=kb, fetcher=fetcher)
+    second = ingest_attack_techniques(kb=kb, fetcher=fetcher)
+
+    assert first == {"feeds": 1, "fetched": 1, "added": 1, "skipped_duplicates": 0}
+    assert second == {"feeds": 1, "fetched": 1, "added": 0, "skipped_duplicates": 1}
+    refs = kb.list_references()
+    assert len(refs) == 1
+    assert refs[0]["filename"] == "ingested::attack::t1059"
+    assert refs[0]["section"] == "T1059 Command and Scripting Interpreter"
+    assert "Description: Adversaries may abuse command interpreters" in refs[0]["content"]
+    assert "Tactics: defense-evasion, execution" in refs[0]["content"]
+    assert "Platforms: Linux, Windows" in refs[0]["content"]
+    assert "marker_attack_t1059" in refs[0]["content"]
+    assert any("T1059" in result["section"] for result in kb.search("marker_attack_t1059"))
+    kb.close()

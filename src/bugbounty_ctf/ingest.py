@@ -20,6 +20,9 @@ FEEDS: Final[list[str]] = [
     "https://portswigger.net/research/rss",
     "https://projectdiscovery.io/blog/rss.xml",
 ]
+MITRE_FEEDS: Final[list[str]] = [
+    "https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json",
+]
 DEFAULT_LIMIT: Final = 20
 MAX_SUMMARY_CHARS: Final = 4000
 REQUEST_TIMEOUT_SECONDS: Final = 20
@@ -119,6 +122,46 @@ def ingest_writeups(
     return summary
 
 
+def ingest_attack_techniques(
+    kb: KnowledgeBase,
+    fetcher: FeedFetcher | None = None,
+) -> IngestSummary:
+    feed_fetcher = fetcher if fetcher is not None else _default_fetcher
+    summary = IngestSummary(feeds=len(MITRE_FEEDS), fetched=0, added=0, skipped_duplicates=0)
+
+    for feed_url in MITRE_FEEDS:
+        try:
+            response = feed_fetcher(feed_url)
+            response.raise_for_status()
+            bundle = json.loads(response.text)
+        except (OSError, TimeoutError, ValueError, requests.RequestException) as exc:
+            logger.warning("skipping MITRE ATT&CK feed %s: %s", feed_url, exc)
+            continue
+
+        objects = bundle.get("objects", []) if isinstance(bundle, dict) else []
+        if not isinstance(objects, list):
+            continue
+        for item in objects:
+            doc = _attack_technique_doc(item)
+            if doc is None:
+                continue
+            title, body, technique_id = doc
+            added = kb.add_reference(
+                source="attack",
+                title=title,
+                body=body,
+                tags="attack,mitre,cti,ingested",
+                key=technique_id,
+            )
+            summary["fetched"] += 1
+            if added:
+                summary["added"] += 1
+            else:
+                summary["skipped_duplicates"] += 1
+
+    return summary
+
+
 def _default_fetcher(url: str) -> FeedResponse:
     response: FeedResponse = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
     return response
@@ -172,6 +215,52 @@ def _entry_to_doc(entry: FeedEntry) -> tuple[str, str, str]:
     stable_id = entry.link or f"{entry.feed_url}:{entry.title}"
     key = hashlib.sha256(stable_id.encode("utf-8")).hexdigest()[:16]
     return entry.title, body, key
+
+
+def _attack_technique_doc(item: object) -> tuple[str, str, str] | None:
+    if not isinstance(item, dict) or item.get("type") != "attack-pattern":
+        return None
+    if item.get("revoked") is True or item.get("x_mitre_deprecated") is True:
+        return None
+    name = item.get("name")
+    description = item.get("description")
+    if not isinstance(name, str):
+        return None
+    references = item.get("external_references")
+    technique_id = ""
+    if isinstance(references, list):
+        for reference in references:
+            if not isinstance(reference, dict) or reference.get("source_name") != "mitre-attack":
+                continue
+            external_id = reference.get("external_id")
+            if isinstance(external_id, str) and external_id.startswith("T"):
+                technique_id = external_id
+                break
+    if not technique_id:
+        return None
+    phases = item.get("kill_chain_phases")
+    tactic_names: set[str] = set()
+    if isinstance(phases, list):
+        for phase in phases:
+            if not isinstance(phase, dict) or phase.get("kill_chain_name") != "mitre-attack":
+                continue
+            phase_name = phase.get("phase_name")
+            if isinstance(phase_name, str):
+                tactic_names.add(phase_name)
+    tactics = sorted(tactic_names)
+    platforms = item.get("x_mitre_platforms")
+    platform_names: list[str] = []
+    if isinstance(platforms, list):
+        platform_names = sorted({platform for platform in platforms if isinstance(platform, str)})
+    body = "\n".join(
+        [
+            f"MITRE ATT&CK technique: {technique_id}",
+            f"Description: {description if isinstance(description, str) else ''}",
+            f"Tactics: {', '.join(tactics) if tactics else 'unknown'}",
+            f"Platforms: {', '.join(platform_names) if platform_names else 'unknown'}",
+        ]
+    )
+    return f"{technique_id} {name}", body, technique_id
 
 
 def _strip_html(raw_html: str) -> str:
