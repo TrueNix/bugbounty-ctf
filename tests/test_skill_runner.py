@@ -77,6 +77,40 @@ class TestGuidance:
 
 
 class TestPromptBuilding:
+    def test_guidance_includes_memory_discipline_preamble(self) -> None:
+        guidance = PhaseGuidance(phase="recon")
+        prompt = SkillOrchestrator._build_agent_prompt(guidance)
+
+        assert "MEMORY DISCIPLINE" in prompt
+        assert "list_dead_ends" in prompt
+        assert "NEVER repeat" in prompt
+
+    def test_guidance_preamble_appears_before_techniques(self) -> None:
+        guidance = PhaseGuidance(
+            phase="recon",
+            available_tools=["scanner.map_surface(path)"],
+            recalled_patterns=[
+                {
+                    "confidence": 0.9,
+                    "worked": 1,
+                    "applied": 1,
+                    "capabilities": ["web_app"],
+                    "steps": [
+                        {
+                            "technique": "web_content_discovery",
+                            "rationale": "map content before fuzzing",
+                        },
+                    ],
+                }
+            ],
+        )
+        prompt = SkillOrchestrator._build_agent_prompt(guidance)
+        first_ten_lines = "\n".join(prompt.splitlines()[:10])
+
+        assert "## MEMORY DISCIPLINE (MANDATORY)" in first_ten_lines
+        assert prompt.index("## MEMORY DISCIPLINE") < prompt.index("## Available tools")
+        assert prompt.index("## MEMORY DISCIPLINE") < prompt.index("## Proven attack pattern")
+
     def test_prompt_includes_phase_and_tools(self) -> None:
         guidance = PhaseGuidance(
             phase="fuzz",

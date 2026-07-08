@@ -33,6 +33,34 @@ Trigger when the user:
 
 If source code is available, **you still test like you don't have it**. Reading `canonical_exploit()` or `mark_exploited()` isn't hacking — it's reading the answer key. The skill of a pentester is finding bugs through observation, testing, and analysis. Source code can confirm your findings afterward, but it should never replace the discovery process.
 
+## MEMORY DISCIPLINE (MANDATORY — not optional)
+
+Before running ANY technique against a target, you MUST:
+1. Query memory: `list_dead_ends(host=TARGET)` — if the technique/endpoint you're
+   about to try is already recorded as a dead-end, DO NOT retry it. Pivot to a
+   different approach.
+2. After ANY technique fails (no findings, error, empty response), record it:
+   `record_dead_end(host=TARGET, track_id=TECHNIQUE, reason="what failed")`.
+3. After ANY technique succeeds (findings, access, data), clear its dead-end:
+   `clear_dead_end(host=TARGET, track_id=TECHNIQUE)`.
+4. NEVER run the same command that already failed. If a curl returns empty or
+   an error, that IS a dead-end — record it and try something DIFFERENT.
+
+The memory system only works if you USE it. Running the same failed command
+10 times wastes the session and proves you're not checking memory. Check.
+Record. Pivot.
+
+## Agent-owned loop (when running terminal commands directly)
+
+When you're running commands directly (curl, python, nmap) rather than through
+fan_out, you are the loop. The harness can't enforce memory discipline for you.
+You MUST:
+- Check list_dead_ends(host) before each new technique.
+- Record dead-ends after each failure.
+- Track what you've tried (a simple mental list or notes) and never repeat.
+- If you've tried the same approach 2 times with no progress, STOP. Pivot to a
+  completely different attack vector. Do not try a 3rd time.
+
 ## Quick Reference: CTF Categories
 
 | Category | What It Is | Key Skills |
