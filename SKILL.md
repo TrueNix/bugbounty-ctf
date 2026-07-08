@@ -219,6 +219,28 @@ findings += builtin_template_scan("http://target/")  # bundled generic exposure 
 Always correlate service versions against `correlate_cves` before assuming a
 service is a dead end — a patched-looking banner may still match a known CVE.
 
+### Product-specific probes
+
+Use focused product probes when the fingerprint names a product with known
+unauthenticated exposure patterns. Langflow is covered by `LangflowProbe`:
+
+```python
+from bugbounty_ctf.api import LangflowProbe, LangflowProbeConfig
+
+probe = LangflowProbe(
+    "http://target/",
+    config=LangflowProbeConfig(public_flow_ids=("known-public-flow-id",)),
+)
+print(probe.fingerprint())
+print(probe.check_unauth_exposure())
+print(probe.check_public_build_exec())
+```
+
+The Langflow build-exec check is benign-only: it self-issues a `client_id`
+cookie and uses a `time.sleep(N)` timing oracle. Treat confidence as `high` only
+when the measured build-duration delta confirms execution; otherwise keep it
+`unconfirmed`.
+
 ## Step 1: Web Exploitation — Black-Box Methodology
 
 ### Phase 0: Load Testing Engine

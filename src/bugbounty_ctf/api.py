@@ -52,6 +52,7 @@ from bugbounty_ctf.forensics import ForensicsToolkit
 from bugbounty_ctf.hypothesis import Hypothesis, HypothesisEngine
 from bugbounty_ctf.kalibox import KaliBox
 from bugbounty_ctf.knowledge import KnowledgeBase
+from bugbounty_ctf.langflow import LangflowProbe, LangflowProbeConfig, known_cves
 from bugbounty_ctf.mail_enum import MailEnumerator, extract_secrets
 from bugbounty_ctf.nfs_enum import NFSEnumerator, NFSExport
 from bugbounty_ctf.oast import (
@@ -132,6 +133,8 @@ __all__ = [
     "KaliBox",
     "KaliEnv",
     "KnowledgeBase",
+    "LangflowProbe",
+    "LangflowProbeConfig",
     "MailEnumerator",
     "NFSEnumerator",
     "NFSExport",
@@ -191,6 +194,7 @@ __all__ = [
     "ip_to_decimal",
     "ip_to_hex",
     "ip_to_octal",
+    "known_cves",
     "list_dead_ends",
     "load_cve_db",
     "load_templates",
