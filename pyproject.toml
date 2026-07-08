@@ -31,6 +31,7 @@ dependencies = [
 [project.optional-dependencies]
 pwn = ["pwntools>=4.10"]
 yaml = ["pyyaml>=6.0"]
+embed = ["sentence-transformers>=2.0"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",

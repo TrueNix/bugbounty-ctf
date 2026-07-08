@@ -28,6 +28,11 @@ from bugbounty_ctf.advanced_tests import (
 )
 from bugbounty_ctf.aws_exploit import AWSExploiter, exploit_aws_credentials
 from bugbounty_ctf.crypto import CryptoToolkit
+from bugbounty_ctf.embedders import (
+    LocalEmbedder,
+    SentenceTransformerEmbedder,
+    default_embedder,
+)
 from bugbounty_ctf.engine import (
     DiffAnalysis,
     ResponseDiff,
@@ -137,6 +142,7 @@ __all__ = [
     "KnowledgeBase",
     "LangflowProbe",
     "LangflowProbeConfig",
+    "LocalEmbedder",
     "MailEnumerator",
     "NFSEnumerator",
     "NFSExport",
@@ -156,6 +162,7 @@ __all__ = [
     "ScannerDB",
     "ScopeGuard",
     "SecurityScanner",
+    "SentenceTransformerEmbedder",
     "ServiceBanner",
     "SessionRecorder",
     "SkillOrchestrator",
@@ -173,6 +180,7 @@ __all__ = [
     "correlate_cves",
     "decode_jwt",
     "default_cve_db",
+    "default_embedder",
     "derive_base_url",
     "detect_defenses",
     "detect_ssrf_filter",
