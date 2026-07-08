@@ -651,6 +651,13 @@ class SkillOrchestrator:
         lines = [
             f"You are a security testing agent for the {guidance.phase} phase.",
         ]
+        lines.insert(0, "## MEMORY DISCIPLINE (MANDATORY)")
+        lines.insert(
+            1, "Before trying ANY technique: list_dead_ends(host) — skip recorded dead-ends."
+        )
+        lines.insert(2, "After any failure: record_dead_end(host, track_id, reason).")
+        lines.insert(3, "NEVER repeat a command that already failed. Pivot.")
+        lines.insert(4, "")
 
         if guidance.target_url:
             # Share the orchestrator's persistence so findings written here are
