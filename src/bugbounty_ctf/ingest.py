@@ -19,7 +19,7 @@ from bugbounty_ctf.knowledge import KnowledgeBase
 FEEDS: Final[list[str]] = [
     "https://ctftime.org/writeups/rss/",
     "https://portswigger.net/research/rss",
-    "https://projectdiscovery.io/blog/rss.xml",
+    "https://projectdiscovery.io/rss.xml",
 ]
 MITRE_FEEDS: Final[list[str]] = [
     "https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json",
@@ -182,7 +182,13 @@ def ingest_attack_techniques(
 
 
 def _default_fetcher(url: str) -> FeedResponse:
-    response: FeedResponse = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+    response: FeedResponse = requests.get(
+        url,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        headers={
+            "User-Agent": "bugbounty-ctf/1.0 (security research; +https://github.com/TrueNix/bugbounty-ctf)"
+        },
+    )
     return response
 
 
