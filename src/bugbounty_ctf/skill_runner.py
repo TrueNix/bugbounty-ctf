@@ -26,7 +26,12 @@ from typing import Any
 
 from bugbounty_ctf.engine import SecurityScanner
 from bugbounty_ctf.knowledge import KnowledgeBase
-from bugbounty_ctf.recon import clear_dead_end, list_dead_ends, record_dead_end
+from bugbounty_ctf.recon import (
+    clear_dead_end,
+    get_consecutive_failures,
+    list_dead_ends,
+    record_dead_end,
+)
 from bugbounty_ctf.taint import render, render_json
 
 # Minimum recalled-pattern confidence for run(mode="auto") to FRONT-LOAD it
@@ -74,6 +79,7 @@ class PhaseGuidance:
     prior_hypotheses: list[dict[str, Any]] = field(default_factory=list)
     prior_dead_ends: list[dict[str, Any]] = field(default_factory=list)
     prior_observations: list[dict[str, Any]] = field(default_factory=list)
+    dead_end_threshold: int = 3
     # Generalized, surface-keyed attack patterns recalled from prior engagements
     # (the cross-box pattern memory). Plain dicts so they render directly.
     recalled_patterns: list[dict[str, Any]] = field(default_factory=list)
@@ -105,10 +111,12 @@ class SkillOrchestrator:
         scanner: SecurityScanner | None = None,
         knowledge_base: KnowledgeBase | None = None,
         delay: float = 0.3,
+        max_consecutive_failures: int = 3,
     ) -> None:
         self.target_url = target_url.rstrip("/")
         self.scanner = scanner or SecurityScanner(target_url, delay=delay)
         self.kb = knowledge_base or KnowledgeBase()
+        self.max_consecutive_failures = max_consecutive_failures
         self.current_phase = "recon"
         # Surface the run dispatched on — reused by :meth:`_writeback_pattern`
         # to build the (generalized) trigger of a captured pattern. Set in
@@ -254,10 +262,24 @@ class SkillOrchestrator:
         return out
 
     def _recall_dead_ends(self) -> list[dict[str, Any]]:
-        try:
-            return list_dead_ends(self.kb, host=self.scanner.host)
-        except Exception:
-            return []
+        with contextlib.suppress(Exception):
+            dead_ends = list_dead_ends(self.kb, host=self.scanner.host)
+            enriched: list[dict[str, Any]] = []
+            for dead_end in dead_ends:
+                entry = dict(dead_end)
+                track_id = str(entry.get("track_id", ""))
+                failures = 0
+                if track_id:
+                    with contextlib.suppress(Exception):
+                        failures = get_consecutive_failures(
+                            self.kb,
+                            host=self.scanner.host,
+                            track_id=track_id,
+                        )
+                entry["consecutive_failures"] = failures
+                enriched.append(entry)
+            return enriched
+        return []
 
     def _recall_observations(self, limit: int = 40) -> list[dict[str, Any]]:
         """Recall high-confidence observations (with their next-test hints)."""
@@ -416,6 +438,7 @@ class SkillOrchestrator:
             prior_hypotheses=self._recall_hypotheses(),
             prior_dead_ends=self._recall_dead_ends(),
             prior_observations=self._recall_observations(),
+            dead_end_threshold=self.max_consecutive_failures,
             recalled_patterns=self._recall_patterns(),
         )
 
@@ -444,6 +467,7 @@ class SkillOrchestrator:
             prior_hypotheses=self._recall_hypotheses(),
             prior_dead_ends=self._recall_dead_ends(),
             prior_observations=self._recall_observations(),
+            dead_end_threshold=self.max_consecutive_failures,
         )
 
     def get_fuzz_guidance(self) -> PhaseGuidance:
@@ -471,6 +495,8 @@ class SkillOrchestrator:
             rag_context=rag,
             scanner_state=self._format_state(),
             previous_findings=self.scanner.findings,
+            prior_dead_ends=self._recall_dead_ends(),
+            dead_end_threshold=self.max_consecutive_failures,
         )
 
     def get_exploit_guidance(self) -> PhaseGuidance:
@@ -489,6 +515,8 @@ class SkillOrchestrator:
             rag_context=rag,
             scanner_state=self._format_state(),
             previous_findings=self.scanner.findings,
+            prior_dead_ends=self._recall_dead_ends(),
+            dead_end_threshold=self.max_consecutive_failures,
             recalled_patterns=self._recall_patterns(),
         )
 
@@ -728,19 +756,38 @@ class SkillOrchestrator:
                 )
 
         if guidance.prior_dead_ends:
-            track_ids = [
-                render(str(d.get("track_id", "?")))
-                for d in guidance.prior_dead_ends[:15]
-                if d.get("track_id")
-            ]
-            if track_ids:
+            stop_lines: list[str] = []
+            advisory_track_ids: list[str] = []
+            for d in guidance.prior_dead_ends[:15]:
+                track_id = str(d.get("track_id", ""))
+                if not track_id:
+                    continue
+                raw_failures = d.get("consecutive_failures", 0)
+                try:
+                    failures = int(raw_failures)
+                except (TypeError, ValueError):
+                    failures = 0
+                rendered_track_id = render(track_id)
+                if failures >= guidance.dead_end_threshold:
+                    stop_lines.append(
+                        f"  - STOP: '{rendered_track_id}' has failed {failures} "
+                        "consecutive times identically on this host — do NOT retry "
+                        "this technique. Pivot to a different attack surface."
+                    )
+                else:
+                    advisory_track_ids.append(rendered_track_id)
+            if stop_lines or advisory_track_ids:
                 lines.extend(
                     [
                         "",
                         "## Known dead-ends on this host (deprioritize — no findings in past runs)",
-                        "  - " + ", ".join(track_ids),
-                        "Re-test only if the surface changed (new port/service since last run).",
                     ]
+                )
+                lines.extend(stop_lines)
+                if advisory_track_ids:
+                    lines.append("  - " + ", ".join(advisory_track_ids))
+                lines.append(
+                    "Re-test only if the surface changed (new port/service since last run)."
                 )
 
         if guidance.prior_observations:
@@ -1185,13 +1232,47 @@ class SkillOrchestrator:
         ``{"responses": {label: text}, "merged": int}``. Fails closed: a missing
         ``hermes`` binary raises :class:`HermesNotFoundError`.
         """
-        prompts = [(label, self._build_task_prompt(label, instr)) for label, instr in tasks]
+        if not tasks:
+            return {
+                "responses": {},
+                "merged": 0,
+                "dead_ends_recorded": 0,
+                "dead_ends_cleared": 0,
+            }
+
+        active_tasks: list[tuple[str, str]] = []
+        suppressed: list[dict[str, Any]] = []
+        for label, instr in tasks:
+            failures = 0
+            with contextlib.suppress(Exception):
+                failures = get_consecutive_failures(
+                    self.kb,
+                    host=self.scanner.host,
+                    track_id=label,
+                )
+            if failures >= self.max_consecutive_failures:
+                print(
+                    f"[fan-out] DROPPING track '{label}' — {failures} "
+                    "consecutive identical failures (dead-end hot)"
+                )
+                suppressed.append(
+                    {
+                        "track_id": label,
+                        "consecutive_failures": failures,
+                        "reason": "dead-end hot",
+                    }
+                )
+                continue
+            active_tasks.append((label, instr))
+
+        prompts = [(label, self._build_task_prompt(label, instr)) for label, instr in active_tasks]
         if not prompts:
             return {
                 "responses": {},
                 "merged": 0,
                 "dead_ends_recorded": 0,
                 "dead_ends_cleared": 0,
+                "suppressed": suppressed,
             }
 
         def run_one(item: tuple[str, str]) -> tuple[str, str]:
@@ -1260,6 +1341,7 @@ class SkillOrchestrator:
             "merged": merged,
             "dead_ends_recorded": dead_ends_recorded,
             "dead_ends_cleared": dead_ends_cleared,
+            "suppressed": suppressed,
             "lessons_written": lessons,
             "pattern_captured": pattern_id,
             "pattern_feedback": pattern_feedback,
