@@ -37,7 +37,11 @@ import os
 import re
 import subprocess
 from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass, is_dataclass
+from pathlib import Path
 from typing import Any
+
+from bugbounty_ctf.brain import BrainError, BrainStore
 
 DEFAULT_IMAGE = "kalilinux/kali-rolling"
 DEFAULT_NAME = "kalibox"
@@ -253,6 +257,10 @@ _USAGE = """kalibox — run offensive tooling inside an isolated Kali container
 Usage:
   kalibox up                 Provision + start the container (first run pulls + installs)
   kalibox status             Show container state
+  kalibox brain status [--root PATH]
+  kalibox brain update [--root PATH]
+  kalibox brain search QUERY... [--limit N] [--root PATH]
+  kalibox brain explain CARD_ID [--root PATH]
   kalibox <command...>       Run a command inside kalibox (e.g. kalibox nmap -sCV 10.129.33.77)
   kalibox shell              Open an interactive Kali shell
   kalibox down               Stop the container
@@ -262,17 +270,146 @@ All attacks run inside the container with host networking; the host is never
 asked for root.
 """
 
+_BRAIN_USAGE = """kalibox brain — install and query the public reference brain
+
+Usage:
+  kalibox brain status [--root PATH]
+  kalibox brain update [--root PATH]
+  kalibox brain search QUERY... [--limit N] [--root PATH]
+  kalibox brain explain CARD_ID [--root PATH]
+
+Search limits must be between 1 and 5. Results are emitted as deterministic JSON.
+"""
+
+
+class _BrainUsageError(ValueError):
+    """Invalid public-brain command-line arguments."""
+
+
+@dataclass(frozen=True, slots=True)
+class _BrainCommand:
+    name: str
+    arguments: tuple[str, ...]
+    root: str | None
+    limit: int
+
+
+def _parse_brain_args(args: list[str]) -> _BrainCommand | None:
+    if not args or args[0] in ("-h", "--help", "help"):
+        if len(args) > 1:
+            raise _BrainUsageError("help does not accept arguments")
+        return None
+
+    name = args[0]
+    if name not in {"status", "update", "search", "explain"}:
+        raise _BrainUsageError(f"unknown command: {name}")
+
+    positional: list[str] = []
+    root: str | None = None
+    limit = 5
+    saw_root = False
+    saw_limit = False
+    index = 1
+    while index < len(args):
+        argument = args[index]
+        if argument == "--root":
+            if saw_root:
+                raise _BrainUsageError("--root may be specified only once")
+            if index + 1 >= len(args) or args[index + 1].startswith("--"):
+                raise _BrainUsageError("--root requires a path")
+            root = args[index + 1]
+            saw_root = True
+            index += 2
+            continue
+        if argument == "--limit":
+            if name != "search":
+                raise _BrainUsageError("--limit is valid only for search")
+            if saw_limit:
+                raise _BrainUsageError("--limit may be specified only once")
+            if index + 1 >= len(args):
+                raise _BrainUsageError("--limit requires an integer")
+            try:
+                limit = int(args[index + 1])
+            except ValueError:
+                raise _BrainUsageError("--limit must be an integer from 1 to 5") from None
+            if not 1 <= limit <= 5:
+                raise _BrainUsageError("--limit must be an integer from 1 to 5")
+            saw_limit = True
+            index += 2
+            continue
+        if argument.startswith("-"):
+            raise _BrainUsageError(f"unknown option: {argument}")
+        positional.append(argument)
+        index += 1
+
+    if name in {"status", "update"} and positional:
+        raise _BrainUsageError(f"{name} does not accept positional arguments")
+    if name == "search" and not " ".join(positional).strip():
+        raise _BrainUsageError("search requires QUERY")
+    if name == "explain" and (len(positional) != 1 or not positional[0].strip()):
+        raise _BrainUsageError("explain requires exactly one CARD_ID")
+
+    return _BrainCommand(name, tuple(positional), root, limit)
+
+
+def _json_default(value: object) -> object:
+    if is_dataclass(value) and not isinstance(value, type):
+        return asdict(value)
+    if isinstance(value, Path):
+        return str(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _brain_main(args: list[str]) -> int:
+    import json
+    import sys
+
+    try:
+        command = _parse_brain_args(args)
+    except _BrainUsageError as error:
+        sys.stderr.write(f"[kalibox brain] usage error: {error}\n")
+        return 2
+
+    if command is None:
+        sys.stdout.write(_BRAIN_USAGE)
+        return 0
+
+    try:
+        store = BrainStore(command.root)
+        if command.name == "status":
+            result: object = store.status()
+        elif command.name == "update":
+            result = store.update()
+        elif command.name == "search":
+            result = store.search(" ".join(command.arguments), limit=command.limit)
+        elif command.name == "explain":
+            result = store.explain(command.arguments[0])
+        else:
+            raise AssertionError(f"unhandled brain command: {command.name}")
+    except BrainError as error:
+        sys.stderr.write(f"[kalibox brain] {error.code}: {error}\n")
+        return 1
+
+    sys.stdout.write(
+        json.dumps(result, default=_json_default, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    return 0
+
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point for the ``kalibox`` console script."""
     import sys
 
     args = list(sys.argv[1:] if argv is None else argv)
-    box = KaliBox()
 
     if not args or args[0] in ("-h", "--help", "help"):
         sys.stdout.write(_USAGE)
         return 0
+
+    if args[0] == "brain":
+        return _brain_main(args[1:])
+
+    box = KaliBox()
 
     sub = args[0]
     try:
