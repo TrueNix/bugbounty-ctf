@@ -17,12 +17,13 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import subprocess
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any
+from typing import Any, Final
 
 from bugbounty_ctf.engine import SecurityScanner
 from bugbounty_ctf.knowledge import KnowledgeBase
@@ -32,6 +33,7 @@ from bugbounty_ctf.recon import (
     list_dead_ends,
     record_dead_end,
 )
+from bugbounty_ctf.scope import ScopeGuard
 from bugbounty_ctf.taint import render, render_json
 
 # Minimum recalled-pattern confidence for run(mode="auto") to FRONT-LOAD it
@@ -63,6 +65,73 @@ _CAPABILITY_TO_TECHNIQUES: dict[str, tuple[str, ...]] = {
 }
 
 
+SCANNER_CONTEXT_ENV: Final = "BUGBOUNTY_CTF_SCANNER_CONTEXT"
+HERMES_ERROR_STDERR_LIMIT: Final = 500
+PROMPT_ERROR_FRAGMENT_MIN_LEN: Final = 16
+
+
+@dataclass(frozen=True, slots=True)
+class ScopeRuntimeContext:
+    allowed: tuple[str, ...]
+    allow_subdomains: bool
+
+    @classmethod
+    def from_scope(cls, scope: ScopeGuard) -> ScopeRuntimeContext:
+        exact = sorted(scope._exact)
+        wildcards = [f"*.{suffix}" for suffix in sorted(scope._wildcard_suffixes)]
+        return cls(allowed=tuple([*exact, *wildcards]), allow_subdomains=scope.allow_subdomains)
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return {"allowed": list(self.allowed), "allow_subdomains": self.allow_subdomains}
+
+
+@dataclass(frozen=True, slots=True)
+class ScannerRuntimeContext:
+    target_url: str
+    state_file: str
+    db_path: str
+    headers: tuple[tuple[str, str], ...]
+    cookies: tuple[tuple[str, str], ...]
+    scope: ScopeRuntimeContext | None
+    timeout: float
+    delay: float
+    respect_waf: bool
+    verify: bool
+
+    @classmethod
+    def from_scanner(cls, scanner: SecurityScanner, target_url: str) -> ScannerRuntimeContext:
+        return cls(
+            target_url=target_url.rstrip("/"),
+            state_file=scanner.state_file,
+            db_path=scanner.db.db_path,
+            headers=tuple(sorted((str(k), str(v)) for k, v in scanner.session.headers.items())),
+            cookies=tuple(
+                sorted((str(k), str(v)) for k, v in scanner.session.cookies.get_dict().items())
+            ),
+            scope=(
+                ScopeRuntimeContext.from_scope(scanner.scope) if scanner.scope is not None else None
+            ),
+            timeout=scanner.timeout,
+            delay=scanner.delay,
+            respect_waf=scanner.respect_waf,
+            verify=scanner.verify,
+        )
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return {
+            "target_url": self.target_url,
+            "state_file": self.state_file,
+            "db_path": self.db_path,
+            "headers": dict(self.headers),
+            "cookies": dict(self.cookies),
+            "scope": self.scope.to_json_dict() if self.scope is not None else None,
+            "timeout": self.timeout,
+            "delay": self.delay,
+            "respect_waf": self.respect_waf,
+            "verify": self.verify,
+        }
+
+
 @dataclass
 class PhaseGuidance:
     """Context provided to the Hermes agent at each phase."""
@@ -88,6 +157,7 @@ class PhaseGuidance:
     target_url: str = ""
     state_file: str = ""
     db_path: str = ""
+    scanner_context_env_var: str = ""
 
 
 class SkillOrchestrator:
@@ -203,7 +273,7 @@ class SkillOrchestrator:
         the new session instead of starting cold every time.
         """
         try:
-            rows = self.scanner.db.findings_for_host(self.scanner.host, limit=limit)
+            rows = self.scanner.db.findings_for_host(self.scanner.target_identity, limit=limit)
         except Exception:
             return []
         seen: set[tuple[Any, Any]] = set()
@@ -231,7 +301,7 @@ class SkillOrchestrator:
         run can skip. Deduped by (vuln_type, param), keeping the latest verdict.
         """
         try:
-            rows = self.scanner.db.query_hypotheses(self.scanner.host, limit=limit)
+            rows = self.scanner.db.query_hypotheses(self.scanner.target_identity, limit=limit)
         except Exception:
             return []
         seen: set[tuple[Any, Any]] = set()
@@ -263,7 +333,7 @@ class SkillOrchestrator:
 
     def _recall_dead_ends(self) -> list[dict[str, Any]]:
         with contextlib.suppress(Exception):
-            dead_ends = list_dead_ends(self.kb, host=self.scanner.host)
+            dead_ends = list_dead_ends(self.kb, host=self.scanner.target_identity)
             enriched: list[dict[str, Any]] = []
             for dead_end in dead_ends:
                 entry = dict(dead_end)
@@ -273,7 +343,7 @@ class SkillOrchestrator:
                     with contextlib.suppress(Exception):
                         failures = get_consecutive_failures(
                             self.kb,
-                            host=self.scanner.host,
+                            host=self.scanner.target_identity,
                             track_id=track_id,
                         )
                 entry["consecutive_failures"] = failures
@@ -285,7 +355,7 @@ class SkillOrchestrator:
         """Recall high-confidence observations (with their next-test hints)."""
         try:
             rows = self.scanner.db.query_observations(
-                self.scanner.host, min_confidence=0.5, limit=limit
+                self.scanner.target_identity, min_confidence=0.5, limit=limit
             )
         except Exception:
             return []
@@ -582,6 +652,7 @@ class SkillOrchestrator:
         guidance.target_url = self.target_url
         guidance.state_file = self.scanner.state_file
         guidance.db_path = self.scanner.db.db_path
+        guidance.scanner_context_env_var = SCANNER_CONTEXT_ENV
         return guidance
 
     def _reload_state(self) -> None:
@@ -591,7 +662,35 @@ class SkillOrchestrator:
         JSON read, no clobber-ordering dance."""
         self.scanner.reload()
 
-    class HermesNotFoundError(RuntimeError):
+    @dataclass(frozen=True, slots=True)
+    class HermesExecutionError(RuntimeError):
+        error_type: str
+        label: str
+        returncode: int | None = None
+        timeout: float | None = None
+        stderr: str = ""
+
+        def __str__(self) -> str:
+            parts = [f"Hermes {self.error_type}", f"label={self.label!r}"]
+            if self.returncode is not None:
+                parts.append(f"rc={self.returncode}")
+            if self.timeout is not None:
+                parts.append(f"timeout={self.timeout:g}s")
+            if self.stderr:
+                parts.append(f"stderr={self.stderr}")
+            return "; ".join(parts)
+
+        def to_dict(self) -> dict[str, Any]:
+            return {
+                "type": self.error_type,
+                "label": self.label,
+                "returncode": self.returncode,
+                "timeout": self.timeout,
+                "stderr": self.stderr,
+            }
+
+    @dataclass(frozen=True, slots=True)
+    class HermesNotFoundError(HermesExecutionError):
         """Raised when the `hermes` binary is not on PATH."""
 
     def spawn_agent(self, guidance: PhaseGuidance, *, timeout: int = 120) -> str:
@@ -609,9 +708,49 @@ class SkillOrchestrator:
         binary raises :class:`HermesNotFoundError` so the caller can abort
         rather than recording four empty phases.
         """
+        guidance = self._attach_shared_context(guidance)
         return self._run_hermes(
             self._build_agent_prompt(guidance), timeout=timeout, label=guidance.phase
         )
+
+    def _scanner_context_json(self) -> str:
+        context = ScannerRuntimeContext.from_scanner(self.scanner, self.target_url)
+        return json.dumps(context.to_json_dict(), sort_keys=True, separators=(",", ":"))
+
+    def _scanner_secret_values(self) -> tuple[str, ...]:
+        values: list[str] = []
+        values.extend(str(v) for _, v in self.scanner.session.headers.items())
+        values.extend(str(v) for v in self.scanner.session.cookies.get_dict().values())
+        split_values: list[str] = []
+        for value in values:
+            split_values.extend(part for part in value.split() if len(part) >= 4)
+        return tuple(sorted({*values, *split_values}, key=len, reverse=True))
+
+    @staticmethod
+    def _coerce_error_text(value: str | bytes | None) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return value
+
+    @staticmethod
+    def _prompt_error_fragments(prompt: str) -> tuple[str, ...]:
+        fragments = {
+            token
+            for token in re.findall(r"[^\s\"'`,;(){}\[\]<>]+", prompt)
+            if len(token) >= PROMPT_ERROR_FRAGMENT_MIN_LEN
+        }
+        return tuple(sorted(fragments, key=len, reverse=True))
+
+    def _sanitize_error_text(self, value: str | bytes | None, *, prompt: str = "") -> str:
+        text = self._coerce_error_text(value).strip()
+        for secret in self._scanner_secret_values():
+            if secret:
+                text = text.replace(secret, "[redacted]")
+        if prompt and any(fragment in text for fragment in self._prompt_error_fragments(prompt)):
+            return ""
+        return text[:HERMES_ERROR_STDERR_LIMIT]
 
     def _run_hermes(self, prompt: str, *, timeout: int, label: str = "agent") -> str:
         """Run one `hermes -z` sub-agent with a prebuilt prompt and return stdout.
@@ -622,24 +761,40 @@ class SkillOrchestrator:
         :class:`HermesNotFoundError`.
         """
         cmd = ["hermes", "-z", prompt, "--yolo"]
+        env = {
+            **os.environ,
+            "HERMES_NO_STREAM": "1",
+            SCANNER_CONTEXT_ENV: self._scanner_context_json(),
+        }
         try:
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                env={**os.environ, "HERMES_NO_STREAM": "1"},
+                env=env,
             )
         except FileNotFoundError as e:
             raise self.HermesNotFoundError(
-                "`hermes` binary not found on PATH — cannot spawn sub-agents"
+                error_type="missing_binary",
+                label=label,
+                stderr="`hermes` binary not found on PATH",
             ) from e
-        except subprocess.TimeoutExpired:
-            return f"[TIMEOUT after {timeout}s]"
+        except subprocess.TimeoutExpired as e:
+            raise self.HermesExecutionError(
+                error_type="timeout",
+                label=label,
+                timeout=float(e.timeout if e.timeout is not None else timeout),
+                stderr=self._sanitize_error_text(e.stderr, prompt=prompt),
+            ) from e
 
         if result.returncode != 0:
-            stderr = (result.stderr or "").strip()
-            return f"[HERMES ERROR rc={result.returncode}] {stderr[:500]}"
+            raise self.HermesExecutionError(
+                error_type="nonzero_exit",
+                label=label,
+                returncode=result.returncode,
+                stderr=self._sanitize_error_text(result.stderr, prompt=prompt),
+            )
 
         response = result.stdout.strip()
         print(f"[{label}] Agent response: {len(response)} chars")
@@ -649,16 +804,58 @@ class SkillOrchestrator:
     def _render_memory_preamble() -> list[str]:
         return [
             "## MEMORY DISCIPLINE (MANDATORY)",
-            "Before trying ANY technique: list_dead_ends(host) — skip recorded dead-ends.",
-            "After any failure: record_dead_end(host, track_id, reason).",
+            "Before trying ANY technique: list_dead_ends(host=scanner.target_identity) — skip recorded dead-ends.",
+            "After any failure: record_dead_end(host=scanner.target_identity, track_id=track_id, reason=reason).",
             "NEVER repeat a command that already failed. Pivot.",
             "",
+        ]
+
+    @staticmethod
+    def _render_context_bootstrap(context_env_var: str, api_comment: str) -> list[str]:
+        return [
+            "",
+            "## Bootstrap (use this exact scanner — it shares state with the orchestrator)",
+            "```python",
+            "import json",
+            "import os",
+            "from bugbounty_ctf import ScopeGuard, SecurityScanner",
+            "from bugbounty_ctf.engine import ScannerDB",
+            f"from bugbounty_ctf import api  # {api_comment}",
+            f"_scanner_context = json.loads(os.environ[{context_env_var!r}])",
+            "_scope_context = _scanner_context['scope']",
+            "scope = (",
+            "    ScopeGuard(",
+            "        _scope_context['allowed'],",
+            "        allow_subdomains=_scope_context['allow_subdomains'],",
+            "    )",
+            "    if _scope_context is not None",
+            "    else None",
+            ")",
+            "scanner = SecurityScanner(",
+            "    _scanner_context['target_url'],",
+            "    state_file=_scanner_context['state_file'],",
+            "    db=ScannerDB(_scanner_context['db_path']),",
+            "    headers=_scanner_context['headers'],",
+            "    timeout=_scanner_context['timeout'],",
+            "    delay=_scanner_context['delay'],",
+            "    respect_waf=_scanner_context['respect_waf'],",
+            "    verify=_scanner_context['verify'],",
+            "    scope=scope,",
+            ")",
+            "scanner.session.cookies.update(_scanner_context['cookies'])",
+            "```",
+            "Run the tools against `scanner` so every finding is persisted automatically.",
         ]
 
     @staticmethod
     def _render_target_info(guidance: PhaseGuidance) -> list[str]:
         if not guidance.target_url:
             return []
+        if guidance.scanner_context_env_var:
+            return SkillOrchestrator._render_context_bootstrap(
+                guidance.scanner_context_env_var,
+                "test_*, detect_defenses, get_aws_credentials…",
+            )
         return [
             "",
             "## Bootstrap (use this exact scanner — it shares state with the orchestrator)",
@@ -944,6 +1141,7 @@ class SkillOrchestrator:
         print(f"{'#' * 60}")
 
         results: dict[str, str] = {}
+        completed_phases: list[str] = []
 
         for phase in self.PHASES:
             # Build guidance NOW so it includes findings the previous agent persisted.
@@ -955,14 +1153,16 @@ class SkillOrchestrator:
 
             try:
                 response = self.spawn_agent(guidance, timeout=timeout_per_phase)
-            except self.HermesNotFoundError as e:
+            except self.HermesExecutionError as e:
                 print(f"[!] {e}")
                 final = self.collect_results()
                 final["agent_responses"] = results
-                final["agent_error"] = str(e)
+                final["completed_phases"] = completed_phases
+                final["agent_error"] = e.to_dict()
                 return final
 
             results[phase] = response[:2000]
+            completed_phases.append(phase)
             print(f"\n[{phase.upper()}] Response preview:")
             print(response[:500])
 
@@ -978,13 +1178,25 @@ class SkillOrchestrator:
 
         final = self.collect_results()
         final["agent_responses"] = results
+        final["completed_phases"] = completed_phases
 
         if verify:
             verdicts = self.verify_findings(votes=verify_votes, timeout=timeout_per_phase)
             final["verification"] = verdicts
-            confirmed = [v["finding"] for v in verdicts if not v["refuted"]]
+            confirmed = [
+                v["finding"]
+                for v in verdicts
+                if v.get("verified") is True and v.get("refuted") is False
+            ]
             final["confirmed_findings"] = confirmed
-            final["refuted_findings"] = [v["finding"] for v in verdicts if v["refuted"]]
+            final["refuted_findings"] = [
+                v["finding"]
+                for v in verdicts
+                if v.get("verified") is True and v.get("refuted") is True
+            ]
+            final["unverified_findings"] = [
+                v["finding"] for v in verdicts if v.get("verified") is not True
+            ]
         else:
             confirmed = list(self.scanner.findings)
 
@@ -1209,20 +1421,10 @@ class SkillOrchestrator:
         lines = [f"You are a security testing sub-agent working the {label!r} track."]
         if self.target_url:
             lines.extend(
-                [
-                    "",
-                    "## Bootstrap (use this exact scanner — it shares state with the orchestrator)",
-                    "```python",
-                    "from bugbounty_ctf import SecurityScanner",
-                    "from bugbounty_ctf.engine import ScannerDB",
-                    "from bugbounty_ctf import api  # test_*, NFSEnumerator, MailEnumerator, …",
-                    "scanner = SecurityScanner(",
-                    f"    {self.target_url!r},",
-                    f"    state_file={self.scanner.state_file!r},",
-                    f"    db=ScannerDB({self.scanner.db.db_path!r}),",
-                    ")",
-                    "```",
-                ]
+                self._render_context_bootstrap(
+                    SCANNER_CONTEXT_ENV,
+                    "test_*, NFSEnumerator, MailEnumerator, …",
+                )
             )
         lines.extend(
             [
@@ -1275,7 +1477,7 @@ class SkillOrchestrator:
             with contextlib.suppress(Exception):
                 failures = get_consecutive_failures(
                     self.kb,
-                    host=self.scanner.host,
+                    host=self.scanner.target_identity,
                     track_id=label,
                 )
             if failures >= self.max_consecutive_failures:
@@ -1303,23 +1505,38 @@ class SkillOrchestrator:
                 "suppressed": suppressed,
             }
 
-        def run_one(item: tuple[str, str]) -> tuple[str, str]:
+        def run_one(item: tuple[str, str]) -> tuple[str, str | None, dict[str, Any] | None]:
             label, prompt = item
             try:
-                return label, self._run_hermes(prompt, timeout=timeout, label=label)
+                return label, self._run_hermes(prompt, timeout=timeout, label=label), None
             except self.HermesNotFoundError:
                 # Affects every track (binary missing) — fail closed, re-raise.
                 raise
+            except self.HermesExecutionError as e:
+                return label, None, e.to_dict()
             except Exception as e:
                 # Isolate a single track's failure so the others still return.
-                return label, f"[TRACK ERROR] {type(e).__name__}: {e}"
+                error = self.HermesExecutionError(
+                    error_type="internal_error",
+                    label=label,
+                    stderr=self._sanitize_error_text(
+                        f"{type(e).__name__}: {e}",
+                        prompt=prompt,
+                    ),
+                )
+                return label, None, error.to_dict()
 
         workers = max(1, min(max_workers, len(prompts)))
         print(f"\n[fan-out] {len(prompts)} parallel track(s), {workers} worker(s)")
         responses: dict[str, str] = {}
+        agent_errors: dict[str, dict[str, Any]] = {}
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            for label, response in pool.map(run_one, prompts):
-                responses[label] = response
+            for label, response, agent_error in pool.map(run_one, prompts):
+                if agent_error is not None:
+                    agent_errors[label] = agent_error
+                    continue
+                if response is not None:
+                    responses[label] = response
 
         # All workers have exited. Single store: reload from the shared
         # ScannerDB to pull in what sub-agents persisted directly, then merge
@@ -1336,20 +1553,18 @@ class SkillOrchestrator:
         dead_ends_cleared = 0
         for label, response in responses.items():
             track_findings = self._parse_findings(response)
-            track_error = response.startswith("[TRACK ERROR]")
-            if not track_findings or track_error:
-                reason = "track error" if track_error else "no findings reported"
+            if not track_findings:
                 with contextlib.suppress(Exception):
                     if record_dead_end(
                         self.kb,
-                        host=self.scanner.host,
+                        host=self.scanner.target_identity,
                         track_id=label,
-                        reason=reason,
+                        reason="no findings reported",
                     ):
                         dead_ends_recorded += 1
             else:
                 with contextlib.suppress(Exception):
-                    if clear_dead_end(self.kb, host=self.scanner.host, track_id=label):
+                    if clear_dead_end(self.kb, host=self.scanner.target_identity, track_id=label):
                         dead_ends_cleared += 1
 
         # Final step: persist what worked. Lessons (technique-level, secret-free)
@@ -1366,6 +1581,7 @@ class SkillOrchestrator:
             self.scanner.db.prune_patterns()
         return {
             "responses": responses,
+            "agent_errors": agent_errors,
             "merged": merged,
             "dead_ends_recorded": dead_ends_recorded,
             "dead_ends_cleared": dead_ends_cleared,
@@ -1384,8 +1600,8 @@ class SkillOrchestrator:
         (vuln type + tech stack + a generalized endpoint *shape*), and every
         retained free-text fragment is funneled through
         :meth:`patterns.PatternGuard.redact` — fail-closed: a fragment that trips
-        the secret detector is OMITTED rather than baked in. The title/host stay
-        as-is: ``host`` is a DB column (not cross-target prose), not the body.
+        the secret detector is OMITTED rather than baked in. The title stays
+        human-readable; the durable lesson namespace uses target identity.
         """
         from bugbounty_ctf import patterns
 
@@ -1406,8 +1622,15 @@ class SkillOrchestrator:
             body_lines.append(f"Tech: {tech_line}")
             body = "\n".join(body_lines)
             tags = ", ".join([vuln, *tech])
+            lesson_key = f"{self.scanner.target_identity}::{vuln}"
             try:
-                if self.kb.add_lesson(title, body, tags=tags, host=self.scanner.host, key=vuln):
+                if self.kb.add_lesson(
+                    title,
+                    body,
+                    tags=tags,
+                    host=self.scanner.target_identity,
+                    key=lesson_key,
+                ):
                     written += 1
             except Exception:
                 continue
@@ -1618,15 +1841,26 @@ class SkillOrchestrator:
         return feedback
 
     @staticmethod
-    def _build_verify_prompt(finding: dict[str, Any], target_url: str) -> str:
+    def _build_verify_prompt(
+        finding: dict[str, Any], target_url: str, scanner_context_env_var: str = ""
+    ) -> str:
         """Prompt a skeptic sub-agent to REFUTE a single finding."""
-        return "\n".join(
+        lines = [
+            "You are an adversarial verifier. Your job is to REFUTE the claim below,",
+            "not to confirm it. Re-test it independently against the target and decide",
+            "whether it actually reproduces. Default to refuted=true when uncertain.",
+            "",
+            f"Target: {render(target_url)}",
+        ]
+        if scanner_context_env_var:
+            lines.extend(
+                SkillOrchestrator._render_context_bootstrap(
+                    scanner_context_env_var,
+                    "test_*, detect_defenses, get_aws_credentials…",
+                )
+            )
+        lines.extend(
             [
-                "You are an adversarial verifier. Your job is to REFUTE the claim below,",
-                "not to confirm it. Re-test it independently against the target and decide",
-                "whether it actually reproduces. Default to refuted=true when uncertain.",
-                "",
-                f"Target: {render(target_url)}",
                 "## Claimed finding",
                 render_json(finding, maxlen=800),
                 "",
@@ -1636,29 +1870,48 @@ class SkillOrchestrator:
                 f"</{SkillOrchestrator.VERDICT_TAG}>",
             ]
         )
+        return "\n".join(lines)
 
     def verify_finding(
         self, finding: dict[str, Any], *, votes: int = 3, timeout: int = 60
     ) -> dict[str, Any]:
         """Spawn ``votes`` skeptic sub-agents and refute by majority.
 
-        Returns ``{"finding", "refuted", "votes"}``. A finding is refuted when a
-        majority of verifiers say so (ties favour keeping the finding).
+        Returns ``{"finding", "verified", "refuted", "votes"}``. A finding is
+        verified only when every requested verifier emits a valid verdict.
         """
-        prompt = self._build_verify_prompt(finding, self.target_url)
+        prompt = self._build_verify_prompt(finding, self.target_url, SCANNER_CONTEXT_ENV)
 
         verdicts: list[dict[str, Any]] = []
+        agent_errors: list[dict[str, Any]] = []
+        invalid_votes = 0
         refuted_count = 0
-        for _ in range(max(1, votes)):
-            response = self._run_hermes(prompt, timeout=timeout, label="verify")
+        requested_votes = max(1, votes)
+        for _ in range(requested_votes):
+            try:
+                response = self._run_hermes(prompt, timeout=timeout, label="verify")
+            except self.HermesExecutionError as e:
+                agent_errors.append(e.to_dict())
+                continue
             verdict = self._extract_tagged_json(response, self.VERDICT_TAG)
-            if isinstance(verdict, dict):
-                verdicts.append(verdict)
-                if verdict.get("refuted") is True:
-                    refuted_count += 1
+            if not isinstance(verdict, dict) or not isinstance(verdict.get("refuted"), bool):
+                invalid_votes += 1
+                continue
+            verdicts.append(verdict)
+            if verdict.get("refuted") is True:
+                refuted_count += 1
 
-        refuted = refuted_count > (len(verdicts) / 2) if verdicts else False
-        return {"finding": finding, "refuted": refuted, "votes": verdicts}
+        verified = len(verdicts) == requested_votes
+        refuted = verified and refuted_count > (len(verdicts) / 2)
+        return {
+            "finding": finding,
+            "verified": verified,
+            "refuted": refuted,
+            "votes": verdicts,
+            "invalid_votes": invalid_votes,
+            "agent_errors": agent_errors,
+            "requested_votes": requested_votes,
+        }
 
     def verify_findings(
         self,
@@ -1678,6 +1931,16 @@ class SkillOrchestrator:
                 results.append(self.verify_finding(finding, votes=votes, timeout=timeout))
             except self.HermesNotFoundError as e:
                 print(f"[verify] aborted: {e}")
-                # Without verifiers we cannot refute — keep findings unverified.
-                return [{"finding": f, "refuted": False, "votes": []} for f in targets]
+                return [
+                    {
+                        "finding": f,
+                        "verified": False,
+                        "refuted": False,
+                        "votes": [],
+                        "invalid_votes": 0,
+                        "agent_errors": [e.to_dict()],
+                        "requested_votes": max(1, votes),
+                    }
+                    for f in targets
+                ]
         return results

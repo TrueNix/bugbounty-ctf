@@ -17,6 +17,8 @@ from bugbounty_ctf.skill_runner import PhaseGuidance, SkillOrchestrator
 class _FakeKB:
     def __init__(self) -> None:
         self.lessons: list[tuple[str, str]] = []
+        self.lesson_hosts: list[str] = []
+        self.lesson_keys: list[str] = []
 
     def search(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         return []
@@ -28,6 +30,8 @@ class _FakeKB:
         self, title: str, body: str, *, tags: str = "", host: str = "", key: str = ""
     ) -> bool:
         self.lessons.append((title, body))
+        self.lesson_hosts.append(host)
+        self.lesson_keys.append(key)
         return True
 
 
@@ -121,8 +125,8 @@ class TestPromptBuilding:
         expected = "\n".join(
             [
                 "## MEMORY DISCIPLINE (MANDATORY)",
-                "Before trying ANY technique: list_dead_ends(host) — skip recorded dead-ends.",
-                "After any failure: record_dead_end(host, track_id, reason).",
+                "Before trying ANY technique: list_dead_ends(host=scanner.target_identity) — skip recorded dead-ends.",
+                "After any failure: record_dead_end(host=scanner.target_identity, track_id=track_id, reason=reason).",
                 "NEVER repeat a command that already failed. Pivot.",
                 "",
                 "You are a security testing agent for the fuzz phase.",
@@ -213,8 +217,8 @@ class TestPromptBuilding:
 
         assert SkillOrchestrator._render_memory_preamble() == [
             "## MEMORY DISCIPLINE (MANDATORY)",
-            "Before trying ANY technique: list_dead_ends(host) — skip recorded dead-ends.",
-            "After any failure: record_dead_end(host, track_id, reason).",
+            "Before trying ANY technique: list_dead_ends(host=scanner.target_identity) — skip recorded dead-ends.",
+            "After any failure: record_dead_end(host=scanner.target_identity, track_id=track_id, reason=reason).",
             "NEVER repeat a command that already failed. Pivot.",
             "",
         ]
@@ -269,7 +273,9 @@ class TestPromptBuilding:
         prompt = SkillOrchestrator._build_agent_prompt(guidance)
 
         assert "MEMORY DISCIPLINE" in prompt
-        assert "list_dead_ends" in prompt
+        assert "list_dead_ends(host=scanner.target_identity)" in prompt
+        assert "record_dead_end(host=scanner.target_identity" in prompt
+        assert "list_dead_ends(host)" not in prompt
         assert "NEVER repeat" in prompt
 
     def test_guidance_preamble_appears_before_techniques(self) -> None:
@@ -385,7 +391,7 @@ class TestFeedForward:
         orch = self._orchestrator(ScannerDB(db_path), tmp_path)
 
         ScannerDB(db_path).save_finding(
-            orch.scanner.host, "/login", "sqli", payload="'", confidence=0.9
+            orch.scanner.target_identity, "/login", "sqli", payload="'", confidence=0.9
         )
         orch._reload_state()
         assert any(f["type"] == "sqli" and f["endpoint"] == "/login" for f in orch.scanner.findings)
@@ -395,13 +401,15 @@ class TestSecondBrain:
     def test_recon_guidance_recalls_prior_findings(self, runner: SkillOrchestrator) -> None:
         # Seed the DB as if a past run found something on this host.
         runner.scanner.db.save_finding(
-            runner.scanner.host, "/login", "sqli", payload="'", confidence=0.9
+            runner.scanner.target_identity, "/login", "sqli", payload="'", confidence=0.9
         )
         guidance = runner.get_recon_guidance()
         assert any(m["vuln_type"] == "sqli" for m in guidance.prior_memory)
 
     def test_prior_memory_rendered_in_prompt(self, runner: SkillOrchestrator) -> None:
-        runner.scanner.db.save_finding(runner.scanner.host, "/login", "sqli", payload="'")
+        runner.scanner.db.save_finding(
+            runner.scanner.target_identity, "/login", "sqli", payload="'"
+        )
         prompt = SkillOrchestrator._build_agent_prompt(runner.get_recon_guidance())
         assert "Prior memory" in prompt
         assert "sqli @ /login" in prompt
@@ -414,9 +422,11 @@ class TestSecondBrain:
         kb = runner.kb
         assert isinstance(kb, _FakeKB)
         assert any("sqli on target.test/login" in title for title, _ in kb.lessons)
+        assert kb.lesson_hosts == [runner.scanner.target_identity]
+        assert kb.lesson_keys == [f"{runner.scanner.target_identity}::sqli"]
 
     def test_recon_recalls_prior_hypotheses(self, runner: SkillOrchestrator) -> None:
-        db, host = runner.scanner.db, runner.scanner.host
+        db, host = runner.scanner.db, runner.scanner.target_identity
         db.save_hypothesis(
             host, {"vuln_type": "sqli", "param": "id", "endpoint": "/x", "confirmed": True}
         )
@@ -427,7 +437,7 @@ class TestSecondBrain:
         assert ("xss", "rejected") in statuses
 
     def test_recon_recalls_prior_observations(self, runner: SkillOrchestrator) -> None:
-        db, host = runner.scanner.db, runner.scanner.host
+        db, host = runner.scanner.db, runner.scanner.target_identity
         db.save_observation(
             host,
             {
@@ -444,7 +454,7 @@ class TestSecondBrain:
         assert "sqli" in vts and "xss" not in vts
 
     def test_prompt_renders_hypotheses_and_observations(self, runner: SkillOrchestrator) -> None:
-        db, host = runner.scanner.db, runner.scanner.host
+        db, host = runner.scanner.db, runner.scanner.target_identity
         db.save_hypothesis(host, {"vuln_type": "sqli", "param": "id", "confirmed": True})
         db.save_hypothesis(host, {"vuln_type": "xss", "param": "q", "rejected": True})
         db.save_observation(
@@ -460,8 +470,12 @@ class TestSecondBrain:
         from bugbounty_ctf.recon import record_dead_end
 
         orch = _runner_with_real_kb(tmp_path)
-        record_dead_end(orch.kb, host=orch.scanner.host, track_id="mail", reason="no findings")
-        record_dead_end(orch.kb, host=orch.scanner.host, track_id="smb", reason="track error")
+        record_dead_end(
+            orch.kb, host=orch.scanner.target_identity, track_id="mail", reason="no findings"
+        )
+        record_dead_end(
+            orch.kb, host=orch.scanner.target_identity, track_id="smb", reason="track error"
+        )
 
         guidance = orch.get_recon_guidance()
         prompt = SkillOrchestrator._build_agent_prompt(guidance)
@@ -477,8 +491,15 @@ class TestSecondBrain:
 
         orch = _runner_with_real_kb(tmp_path)
         for _ in range(orch.max_consecutive_failures):
-            record_dead_end(orch.kb, host=orch.scanner.host, track_id="web", reason="spdy failed")
-        record_dead_end(orch.kb, host=orch.scanner.host, track_id="mail", reason="no auth")
+            record_dead_end(
+                orch.kb,
+                host=orch.scanner.target_identity,
+                track_id="web",
+                reason="spdy failed",
+            )
+        record_dead_end(
+            orch.kb, host=orch.scanner.target_identity, track_id="mail", reason="no auth"
+        )
 
         guidance = orch.get_recon_guidance()
         prompt = SkillOrchestrator._build_agent_prompt(guidance)
@@ -488,6 +509,54 @@ class TestSecondBrain:
         assert "STOP: 'web' has failed 3 consecutive times identically on this host" in prompt
         assert "do NOT retry this technique" in prompt
         assert "STOP: 'mail'" not in prompt
+
+    def test_target_identity_isolates_prior_memory_and_dead_ends_across_ports(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from bugbounty_ctf.knowledge import KnowledgeBase
+        from bugbounty_ctf.recon import list_dead_ends, record_dead_end
+
+        # Given: two orchestrators share one host and stores, but target different ports.
+        db_path = str(tmp_path / "shared.db")
+        refs = tmp_path / "refs"
+        refs.mkdir()
+        kb = KnowledgeBase(db_path=str(tmp_path / "kb.db"), references_dir=str(refs))
+        scanner_a = SecurityScanner(
+            "http://10.1.2.3:8080/",
+            state_file=str(tmp_path / "a.json"),
+            db=ScannerDB(db_path),
+        )
+        scanner_b = SecurityScanner(
+            "http://10.1.2.3:9090/",
+            state_file=str(tmp_path / "b.json"),
+            db=ScannerDB(db_path),
+        )
+        orch_a = SkillOrchestrator(scanner_a.base_url, scanner=scanner_a, knowledge_base=kb)
+        orch_b = SkillOrchestrator(scanner_b.base_url, scanner=scanner_b, knowledge_base=kb)
+        scanner_a.db.save_finding(
+            scanner_a.target_identity, "/admin", "sqli", payload="'", confidence=0.9
+        )
+        record_dead_end(kb, host=scanner_a.target_identity, track_id="web", reason="no findings")
+
+        def fake_run(prompt: str, *, timeout: int, label: str = "agent") -> str:
+            return "<FINDINGS>[]</FINDINGS>"
+
+        monkeypatch.setattr(orch_a, "_run_hermes", fake_run)
+
+        # When: the first target records another empty-track dead-end through production code.
+        result = orch_a.fan_out([("mail", "empty mail track")])
+        guidance_a = orch_a.get_recon_guidance()
+        guidance_b = orch_b.get_recon_guidance()
+
+        # Then: exact target identity recalls its prior memory, while the sibling port is cold.
+        assert scanner_a.host == scanner_b.host == "10.1.2.3"
+        assert scanner_a.target_identity != scanner_b.target_identity
+        assert result["dead_ends_recorded"] == 1
+        assert {m["vuln_type"] for m in guidance_a.prior_memory} == {"sqli"}
+        assert {d["track_id"] for d in guidance_a.prior_dead_ends} == {"mail", "web"}
+        assert guidance_b.prior_memory == []
+        assert guidance_b.prior_dead_ends == []
+        assert list_dead_ends(kb, host=scanner_b.target_identity) == []
 
 
 class TestStructuredOutput:
@@ -684,16 +753,19 @@ class TestSpawnAgent:
         guidance = runner.get_recon_guidance()
         assert runner.spawn_agent(guidance) == "agent output"
 
-    def test_nonzero_exit_surfaces_stderr(
+    def test_nonzero_exit_raises_execution_error(
         self, runner: SkillOrchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def fake_run(*args: Any, **kwargs: Any) -> Any:
             return subprocess.CompletedProcess(args=[], returncode=2, stdout="", stderr="boom")
 
         monkeypatch.setattr(skill_runner.subprocess, "run", fake_run)
-        out = runner.spawn_agent(runner.get_recon_guidance())
-        assert out.startswith("[HERMES ERROR rc=2]")
-        assert "boom" in out
+        with pytest.raises(SkillOrchestrator.HermesExecutionError) as exc_info:
+            runner.spawn_agent(runner.get_recon_guidance())
+        error = exc_info.value.to_dict()
+        assert error["type"] == "nonzero_exit"
+        assert error["returncode"] == 2
+        assert error["stderr"] == "boom"
 
     def test_missing_binary_raises(
         self, runner: SkillOrchestrator, monkeypatch: pytest.MonkeyPatch
@@ -705,15 +777,18 @@ class TestSpawnAgent:
         with pytest.raises(SkillOrchestrator.HermesNotFoundError):
             runner.spawn_agent(runner.get_recon_guidance())
 
-    def test_timeout_returns_marker(
+    def test_timeout_raises_execution_error(
         self, runner: SkillOrchestrator, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def fake_run(*args: Any, **kwargs: Any) -> Any:
             raise subprocess.TimeoutExpired(cmd="hermes", timeout=1)
 
         monkeypatch.setattr(skill_runner.subprocess, "run", fake_run)
-        out = runner.spawn_agent(runner.get_recon_guidance(), timeout=1)
-        assert "TIMEOUT" in out
+        with pytest.raises(SkillOrchestrator.HermesExecutionError) as exc_info:
+            runner.spawn_agent(runner.get_recon_guidance(), timeout=1)
+        error = exc_info.value.to_dict()
+        assert error["type"] == "timeout"
+        assert error["timeout"] == 1
 
 
 class TestRunWithAgents:
@@ -725,7 +800,9 @@ class TestRunWithAgents:
 
         monkeypatch.setattr(skill_runner.subprocess, "run", fake_run)
         result = runner.run_with_agents()
-        assert "agent_error" in result
+        assert result["agent_error"]["type"] == "missing_binary"
+        assert result["agent_error"]["label"] == "recon"
+        assert result["agent_responses"] == {}
 
 
 class TestFanOut:
@@ -787,9 +864,17 @@ class TestFanOut:
 
         monkeypatch.setattr(runner, "_run_hermes", fake_run)
         result = runner.fan_out([("boom", "blow up"), ("nfs", "Enumerate NFS exports")])
-        assert set(result["responses"]) == {"boom", "nfs"}
-        assert "[TRACK ERROR]" in result["responses"]["boom"]
+        assert set(result["responses"]) == {"nfs"}
+        assert result["agent_errors"]["boom"] == {
+            "type": "internal_error",
+            "label": "boom",
+            "returncode": None,
+            "timeout": None,
+            "stderr": "RuntimeError: track exploded",
+        }
         assert result["merged"] == 1
+        assert result["dead_ends_recorded"] == 0
+        assert result["dead_ends_cleared"] == 0
         assert any(f["type"] == "nfs-export" for f in runner.scanner.findings)
 
     def test_fan_out_records_empty_track_as_dead_end(
@@ -814,7 +899,7 @@ class TestFanOut:
 
         result = orch.fan_out([("empty", "no-op track"), ("web", "productive track")])
 
-        dead_ends = list_dead_ends(orch.kb, host=orch.scanner.host)
+        dead_ends = list_dead_ends(orch.kb, host=orch.scanner.target_identity)
         assert result["dead_ends_recorded"] == 1
         assert result["dead_ends_cleared"] == 0
         assert {d["track_id"] for d in dead_ends} == {"empty"}
@@ -825,7 +910,9 @@ class TestFanOut:
         from bugbounty_ctf.recon import list_dead_ends, record_dead_end
 
         orch = _runner_with_real_kb(tmp_path)
-        record_dead_end(orch.kb, host=orch.scanner.host, track_id="mail", reason="no findings")
+        record_dead_end(
+            orch.kb, host=orch.scanner.target_identity, track_id="mail", reason="no findings"
+        )
 
         def fake_run(prompt: str, *, timeout: int, label: str = "agent") -> str:
             return (
@@ -840,7 +927,7 @@ class TestFanOut:
 
         assert result["dead_ends_recorded"] == 0
         assert result["dead_ends_cleared"] == 1
-        assert list_dead_ends(orch.kb, host=orch.scanner.host) == []
+        assert list_dead_ends(orch.kb, host=orch.scanner.target_identity) == []
 
     def test_fan_out_drops_track_at_consecutive_failure_threshold(
         self,
@@ -1168,7 +1255,7 @@ class TestRecalledPatternBlock:
         _seed_enigma_pattern(runner)
         # Also seed a prior finding so the "Prior memory" block appears.
         runner.scanner.db.save_finding(
-            runner.scanner.host,
+            runner.scanner.target_identity,
             endpoint="/old",
             method="GET",
             payload="x",

@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from bugbounty_ctf.execenv import KaliEnv
+from bugbounty_ctf.execenv import HostEnv, KaliEnv
 from bugbounty_ctf.mail_enum import MailEnumerator, extract_secrets
 from bugbounty_ctf.nfs_enum import NFSEnumerator, NFSExport
 
@@ -86,6 +87,25 @@ class FakeKaliEnv(KaliEnv):
             if contains in joined:
                 return resp
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+
+class RecordingHostEnv(HostEnv):
+    def __init__(self, *, write_key: bool = False, error: OSError | None = None) -> None:
+        self.calls: list[list[str]] = []
+        self.write_key = write_key
+        self.error = error
+
+    def run(
+        self, argv: Sequence[str], *, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        if self.error is not None:
+            raise self.error
+        cmd = list(argv)
+        self.calls.append(cmd)
+        if self.write_key:
+            mountpoint = Path(cmd[-1])
+            (mountpoint / "id_rsa").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nx\n")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="")
 
 
 class TestNFSEnumerator:
@@ -184,29 +204,65 @@ class TestNFSEnumerator:
     def test_mount_and_scan_host_env_scans_directly(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # HostEnv path: mount at the host path, scan it directly via scan_dir.
-        from bugbounty_ctf import execenv
-        from bugbounty_ctf.execenv import HostEnv
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        monkeypatch.setattr(tempfile, "tempdir", None)
 
-        # Redirect the mountpoint base to a real tmp dir so scan_dir reads loot.
-        monkeypatch.setattr(KaliEnv, "container_workdir", str(tmp_path), raising=False)
-        monkeypatch.setattr(execenv, "CONTAINER_WORKDIR", str(tmp_path), raising=False)
-        loot = tmp_path / "share"
-        loot.mkdir()
-        (loot / "id_rsa").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nx\n")
-
-        class StubHostEnv(HostEnv):
-            def run(
-                self, argv: Sequence[str], *, timeout: float | None = None
-            ) -> subprocess.CompletedProcess[str]:
-                return subprocess.CompletedProcess(args=list(argv), returncode=0, stdout="")
-
-        nfs = NFSEnumerator("10.0.0.1", env=StubHostEnv())
+        env = RecordingHostEnv(write_key=True)
+        nfs = NFSEnumerator("10.0.0.1", env=env)
         report = nfs.mount_and_scan("/srv/nfs/onboarding", name="share")
+
         assert report["mount"]["mounted"] is True
+        mountpoint = Path(report["mount"]["mountpoint"])
+        assert mountpoint.is_relative_to(tmp_path)
+        assert mountpoint.name == "share"
+        assert not str(mountpoint).startswith(KaliEnv.container_workdir)
+        assert mountpoint.exists()
+        mount_call = next(c for c in env.calls if "mount" in c)
+        assert str(mountpoint) in mount_call
         assert report["scan"] is not None
         names = {os.path.basename(e["path"]) for e in report["scan"]["ssh_keys"]}
         assert "id_rsa" in names
+
+    def test_mount_and_scan_host_env_rejects_name_traversal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        monkeypatch.setattr(tempfile, "tempdir", None)
+
+        env = RecordingHostEnv()
+        nfs = NFSEnumerator("10.0.0.1", env=env)
+
+        report = nfs.mount_and_scan("/srv/nfs/onboarding", name="../escape")
+
+        assert report["mount"]["mounted"] is False
+        assert report["scan"] is None
+        assert "Invalid mount name" in report["mount"]["error"]
+        assert env.calls == []
+
+    def test_try_mount_reports_directory_creation_error_without_raising(
+        self, tmp_path: Path
+    ) -> None:
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a directory")
+
+        env = RecordingHostEnv()
+        nfs = NFSEnumerator("10.0.0.1", env=env)
+
+        result = nfs.try_mount("/srv/nfs/onboarding", str(blocker / "share"))
+
+        assert result["mounted"] is False
+        assert "mountpoint directory error" in result["error"]
+        assert env.calls == []
+
+    def test_try_mount_reports_command_os_error_without_raising(self, tmp_path: Path) -> None:
+        nfs = NFSEnumerator(
+            "10.0.0.1", env=RecordingHostEnv(error=PermissionError("mount exec denied"))
+        )
+
+        result = nfs.try_mount("/srv/nfs/onboarding", str(tmp_path / "share"))
+
+        assert result["mounted"] is False
+        assert "mount exec denied" in result["error"]
 
     def test_scan_dir_flags_ssh_keys_and_secrets(self, tmp_path: Path) -> None:
         (tmp_path / "id_rsa").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nx\n")

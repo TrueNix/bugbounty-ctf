@@ -228,12 +228,12 @@ class HypothesisEngine:
         if not self.persist:
             return
         with contextlib.suppress(Exception):
-            self.scanner.db.save_hypothesis(self.scanner.host, h.to_dict())
+            self.scanner.db.save_hypothesis(self.scanner.target_identity, h.to_dict())
 
     def load_prior(self, *, status: str = "confirmed") -> list[dict[str, Any]]:
         """Recall hypotheses resolved in past runs against this host."""
         try:
-            return self.scanner.db.query_hypotheses(self.scanner.host, status=status)
+            return self.scanner.db.query_hypotheses(self.scanner.target_identity, status=status)
         except Exception:
             return []
 

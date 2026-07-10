@@ -38,7 +38,10 @@ import importlib.resources
 import json
 import os
 import re
+import subprocess
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from bugbounty_ctf import nfs_scan
@@ -48,6 +51,7 @@ from bugbounty_ctf.execenv import ExecEnv, HostEnv, KaliEnv, default_exec_env
 _COMMON_ROOTS = ("/home", "/srv/nfs", "/srv", "/var/nfs", "/exports", "/mnt", "/opt", "/data")
 
 _HOST_RE = re.compile(r"^[A-Za-z0-9._:\-\[\]]+$")
+_HOST_MOUNT_ROOT = "bugbounty_ctf_nfs"
 
 
 @dataclass
@@ -75,8 +79,10 @@ class NFSEnumerator:
         try:
             r = self.env.run(argv, timeout=timeout)
             return r.stdout, r.stderr, r.returncode
-        except Exception:
-            return "", "", -1
+        except (OSError, subprocess.SubprocessError) as exc:
+            return "", str(exc), -1
+        except Exception as exc:
+            return "", str(exc), -1
 
     def list_exports(self) -> list[NFSExport]:
         """Return advertised exports via ``showmount -e`` (empty if none/blocked)."""
@@ -138,17 +144,26 @@ class NFSEnumerator:
         Returns ``{remote, mountpoint, mounted, error}`` and never raises, so
         callers can sweep candidates and report what needs privilege.
         """
+        remote = f"{self.host}:{remote_path}"
         # Only create the directory for host-side mounts; container paths under
         # /work live inside the container's namespace.
         if isinstance(self.env, HostEnv):
-            os.makedirs(mountpoint, exist_ok=True)
+            try:
+                os.makedirs(mountpoint, exist_ok=True)
+            except OSError as exc:
+                return {
+                    "remote": remote,
+                    "mountpoint": mountpoint,
+                    "mounted": False,
+                    "error": f"mountpoint directory error: {exc}",
+                }
         opts = f"vers={vers},nolock" + (",ro" if read_only else "")
         _, err, rc = self._exec(
-            ["mount", "-t", "nfs", "-o", opts, f"{self.host}:{remote_path}", mountpoint],
+            ["mount", "-t", "nfs", "-o", opts, remote, mountpoint],
             timeout=25,
         )
         return {
-            "remote": f"{self.host}:{remote_path}",
+            "remote": remote,
             "mountpoint": mountpoint,
             "mounted": rc == 0,
             "error": err.strip() if rc != 0 else "",
@@ -161,8 +176,8 @@ class NFSEnumerator:
         the container (NOT under ``/work``, whose ``rprivate`` bind mount would
         hide the submount from the host). The standalone scanner is copied into
         the container via the ``/work`` bind mount and run there, and its JSON
-        report is parsed back. For a ``HostEnv`` the share is mounted at the
-        given host path and scanned directly via ``scan_dir``.
+        report is parsed back. For a ``HostEnv`` the share is mounted under a
+        deterministic host temp directory and scanned directly via ``scan_dir``.
 
         Returns ``{"mount": <try_mount result>, "scan": <report|None>}`` — scan
         is ``None`` if the mount failed or the in-container scan output could not
@@ -170,7 +185,26 @@ class NFSEnumerator:
         """
         if isinstance(self.env, KaliEnv):
             return self._mount_and_scan_container(remote_path, name=name)
-        mountpoint = f"{KaliEnv.container_workdir}/{name}"
+        try:
+            base = (Path(tempfile.gettempdir()) / _HOST_MOUNT_ROOT).resolve(strict=False)
+            mountpoint_path = (base / name).resolve(strict=False)
+        except OSError as exc:
+            mount = {
+                "remote": f"{self.host}:{remote_path}",
+                "mountpoint": "",
+                "mounted": False,
+                "error": f"host mountpoint error: {exc}",
+            }
+            return {"mount": mount, "scan": None}
+        if mountpoint_path != base and not mountpoint_path.is_relative_to(base):
+            mount = {
+                "remote": f"{self.host}:{remote_path}",
+                "mountpoint": str(base),
+                "mounted": False,
+                "error": f"Invalid mount name: {name!r}",
+            }
+            return {"mount": mount, "scan": None}
+        mountpoint = str(mountpoint_path)
         mount = self.try_mount(remote_path, mountpoint)
         scan = self.scan_dir(mountpoint) if mount["mounted"] else None
         return {"mount": mount, "scan": scan}

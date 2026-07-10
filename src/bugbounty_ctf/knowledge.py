@@ -112,7 +112,7 @@ class KnowledgeBase:
         """Find the references/ directory relative to this package."""
         pkg_dir = Path(__file__).parent
         candidates = [
-            pkg_dir.parent / "references",
+            pkg_dir / "references",
             pkg_dir.parent.parent / "references",
             Path.cwd() / "references",
         ]

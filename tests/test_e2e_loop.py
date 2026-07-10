@@ -160,7 +160,7 @@ def test_fan_out_deadend_roundtrip_without_agents(
     refs.mkdir()
     kb = KnowledgeBase(db_path=str(tmp_path / "kb.db"), references_dir=refs)
     orchestrator = SkillOrchestrator(local_target.base_url, scanner=scanner, knowledge_base=kb)
-    record_dead_end(kb, host=scanner.host, track_id="web", reason="previously empty")
+    record_dead_end(kb, host=scanner.target_identity, track_id="web", reason="previously empty")
 
     per_label: dict[str, str] = {
         "empty": "<FINDINGS>[]</FINDINGS>",
@@ -172,8 +172,11 @@ def test_fan_out_deadend_roundtrip_without_agents(
     }
 
     def fake_run(prompt: str, *, timeout: int, label: str = "agent") -> str:
-        if local_target.base_url not in prompt or str(scanner.db.db_path) not in prompt:
-            raise AssertionError("fan-out prompt lost shared target or ScannerDB path")
+        if (
+            "_scanner_context['target_url']" not in prompt
+            or "ScannerDB(_scanner_context['db_path'])" not in prompt
+        ):
+            raise AssertionError("fan-out prompt lost shared target or ScannerDB context")
         return per_label[label]
 
     monkeypatch.setattr(orchestrator, "_run_hermes", fake_run)
@@ -186,7 +189,7 @@ def test_fan_out_deadend_roundtrip_without_agents(
     )
 
     # Then: the dead-end write/clear round-trip is visible in real KB-backed guidance.
-    dead_ends = list_dead_ends(kb, host=scanner.host)
+    dead_ends = list_dead_ends(kb, host=scanner.target_identity)
     guidance = orchestrator.get_recon_guidance()
     prompt = SkillOrchestrator._build_agent_prompt(guidance)
 

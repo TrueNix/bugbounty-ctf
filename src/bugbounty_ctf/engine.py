@@ -12,11 +12,12 @@ import os
 import re
 import sqlite3
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
-from urllib.parse import urljoin, urlparse
+from typing import TYPE_CHECKING, Any, ClassVar, Final
+from urllib.parse import ParseResult, urljoin, urlparse
 
 import requests
 import urllib3
@@ -297,6 +298,58 @@ _NOISE_PATTERNS = [
     re.compile(r'timestamp["\']?\s*[:=]\s*["\']?\d{10,}["\']?', re.IGNORECASE),
 ]
 
+_DEFAULT_SCHEME_PORTS = {"http": 80, "https": 443}
+_DB_FILE_MODE: Final = 0o600
+_DB_OPEN_FLAGS: Final = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _parsed_port(parsed: ParseResult) -> int | None:
+    try:
+        return parsed.port
+    except ValueError:
+        return None
+
+
+def _url_has_explicit_port(parsed: ParseResult) -> bool:
+    host_part = parsed.netloc.rsplit("@", 1)[-1]
+    if host_part.startswith("["):
+        return "]:" in host_part
+    return ":" in host_part
+
+
+def _host_header_name(host: str) -> str:
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
+def _target_vhost(parsed: ParseResult, host: str, port: int) -> str:
+    if _url_has_explicit_port(parsed):
+        return f"{_host_header_name(host)}:{port}"
+    return _host_header_name(host)
+
+
+def _host_header(headers: Mapping[str, str]) -> str | None:
+    for name, value in headers.items():
+        if name.lower() == "host":
+            normalized = value.strip().lower()
+            return normalized or None
+    return None
+
+
+def _scanner_target_identity(base_url: str, headers: Mapping[str, str]) -> str:
+    """Build the ScannerDB key from non-secret target routing fields only.
+
+    Legacy bare-host rows are intentionally ignored because falling back to
+    them would reintroduce cross-target contamination.
+    """
+    parsed = urlparse(base_url)
+    scheme = (parsed.scheme or "unknown").lower()
+    host = (parsed.hostname or "unknown").lower()
+    port = _parsed_port(parsed) or _DEFAULT_SCHEME_PORTS.get(scheme, 0)
+    vhost = _host_header(headers) or _target_vhost(parsed, host, port)
+    return f"scheme={scheme};host={host};port={port};vhost={vhost}"
+
 
 def _strip_noise(text: str) -> str:
     """Strip dynamic noise (CSRF tokens, nonces, timestamps) from response text."""
@@ -332,6 +385,29 @@ def _default_state_file(base_url: str) -> str:
     host = urlparse(base_url).hostname or "unknown"
     safe_host = re.sub(r"[^a-zA-Z0-9._-]", "", host)
     return os.path.expanduser(f"~/.hermes/state/{safe_host}.json")
+
+
+def _can_chmod_db_path(db_path: str) -> bool:
+    return os.name != "nt" and db_path != ":memory:" and not db_path.startswith("file:")
+
+
+class DatabaseSecurityError(RuntimeError):
+    def __str__(self) -> str:
+        return "Could not secure database file permissions"
+
+
+def _secure_db_file(db_path: str) -> None:
+    if not _can_chmod_db_path(db_path):
+        return
+
+    try:
+        fd = os.open(db_path, _DB_OPEN_FLAGS, _DB_FILE_MODE)
+        try:
+            os.fchmod(fd, _DB_FILE_MODE)
+        finally:
+            os.close(fd)
+    except OSError:
+        raise DatabaseSecurityError() from None
 
 
 def _create_findings_table(conn: sqlite3.Connection) -> None:
@@ -432,6 +508,23 @@ def _create_patterns_table(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _create_auth_material_table(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS auth_material (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target_identity TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            name TEXT NOT NULL,
+            value TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT '',
+            timestamp TEXT,
+            UNIQUE(target_identity, kind, name, value, source)
+        );
+        CREATE INDEX IF NOT EXISTS idx_auth_material_target
+            ON auth_material(target_identity, kind);
+    """)
+
+
 def _scan_prepare(
     url: str,
     method: str,
@@ -513,6 +606,7 @@ class ScannerDB:
     @property
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
+            _secure_db_file(self.db_path)
             self._conn = sqlite3.connect(self.db_path)
             self._conn.row_factory = sqlite3.Row
         return self._conn
@@ -524,6 +618,7 @@ class ScannerDB:
         _create_observations_table(conn)
         _create_hypotheses_table(conn)
         _create_patterns_table(conn)
+        _create_auth_material_table(conn)
         conn.commit()
         self._migrate()
 
@@ -707,6 +802,38 @@ class ScannerDB:
         except (json.JSONDecodeError, ValueError):
             return []
         return list(value) if isinstance(value, list) else []
+
+    def save_auth_material(
+        self,
+        target_identity: str,
+        kind: str,
+        name: str,
+        value: str,
+        source: str = "",
+    ) -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO auth_material "
+            "(target_identity, kind, name, value, source, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (target_identity, kind, name, value, source, datetime.now().isoformat()),
+        )
+        self.conn.commit()
+
+    def load_auth_material(self, target_identity: str) -> list[dict[str, str]]:
+        rows = self.conn.execute(
+            "SELECT kind, name, value, source FROM auth_material "
+            "WHERE target_identity = ? ORDER BY id ASC",
+            (target_identity,),
+        ).fetchall()
+        return [
+            {
+                "kind": row["kind"],
+                "name": row["name"],
+                "value": row["value"],
+                "source": row["source"],
+            }
+            for row in rows
+        ]
 
     def query_findings(self, where: str = "", params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
         sql = "SELECT * FROM findings"
@@ -1093,6 +1220,10 @@ class SecurityScanner:
         self.db = db or ScannerDB()
         self.reload()
 
+    @property
+    def target_identity(self) -> str:
+        return _scanner_target_identity(self.base_url, self.session.headers)
+
     @staticmethod
     def _finding_from_row(row: dict[str, Any]) -> dict[str, Any]:
         """Rebuild the in-memory finding dict shape from a ScannerDB row.
@@ -1131,12 +1262,31 @@ class SecurityScanner:
         them up. The JSON ``state_file`` is never read back here — it is a
         derived snapshot artifact only (see :meth:`save_snapshot`).
         """
-        rows = self.db.findings_for_host(self.host, limit=10_000)
+        rows = self.db.findings_for_host(self.target_identity, limit=10_000)
         # findings_for_host returns most-recent-first; restore chronological
         # order so the in-memory list matches record-time ordering.
         self.findings = [self._finding_from_row(r) for r in reversed(rows)]
-        self.attack_surface = self.db.latest_surface_for_host(self.host)
-        self.defenses_detected = self.db.defenses_for_host(self.host)
+        self.attack_surface = self.db.latest_surface_for_host(self.target_identity)
+        self.defenses_detected = self.db.defenses_for_host(self.target_identity)
+        self._restore_auth_material()
+
+    def _restore_auth_material(self) -> None:
+        for name in self.captured_cookies:
+            self.session.cookies.pop(name, None)
+        self.captured_credentials = []
+        self.captured_tokens = {}
+        self.captured_cookies = {}
+        for row in self.db.load_auth_material(self.target_identity):
+            kind = row["kind"]
+            if kind == "credential":
+                self.captured_credentials.append(
+                    {"username": row["name"], "password": row["value"], "source": row["source"]}
+                )
+            elif kind == "token":
+                self.captured_tokens[row["name"]] = row["value"]
+            elif kind == "cookie":
+                self.captured_cookies[row["name"]] = row["value"]
+                self.session.cookies.set(row["name"], row["value"])
 
     def save_snapshot(self, path: str | None = None) -> str:
         """Write the current state to JSON as a human-readable ARTIFACT.
@@ -1190,17 +1340,20 @@ class SecurityScanner:
     def capture_credential(self, username: str, password: str, source: str = "") -> None:
         """Record a captured credential for reuse."""
         cred = {"username": username, "password": password, "source": source}
+        self.db.save_auth_material(self.target_identity, "credential", username, password, source)
         if cred not in self.captured_credentials:
             self.captured_credentials.append(cred)
             print(f"[+] Credential captured: {username} (source: {source})")
 
     def capture_token(self, name: str, token: str, source: str = "") -> None:
         """Record a captured token (JWT, API key, session token)."""
+        self.db.save_auth_material(self.target_identity, "token", name, token, source)
         self.captured_tokens[name] = token
         print(f"[+] Token captured: {name} (source: {source})")
 
-    def capture_cookie(self, name: str, value: str) -> None:
+    def capture_cookie(self, name: str, value: str, source: str = "") -> None:
         """Record a captured cookie and inject into session."""
+        self.db.save_auth_material(self.target_identity, "cookie", name, value, source)
         self.captured_cookies[name] = value
         self.session.cookies.set(name, value)
         print(f"[+] Cookie captured: {name}")
@@ -1238,6 +1391,8 @@ class SecurityScanner:
         if self.scope is not None:
             self.scope.check(url)
 
+        request_kwargs = dict(kwargs)
+        allow_redirects = request_kwargs.pop("allow_redirects", True)
         delay = self._effective_delay()
 
         for attempt in range(2):
@@ -1245,7 +1400,49 @@ class SecurityScanner:
                 time.sleep(delay)
             start = time.time()
             try:
-                response = self.session.request(method, url, timeout=self.timeout, **kwargs)
+                if self.scope is None or not allow_redirects:
+                    response = self.session.request(
+                        method,
+                        url,
+                        timeout=self.timeout,
+                        allow_redirects=allow_redirects,
+                        **request_kwargs,
+                    )
+                else:
+                    response = self.session.request(
+                        method,
+                        url,
+                        timeout=self.timeout,
+                        allow_redirects=False,
+                        **request_kwargs,
+                    )
+                    history: list[requests.Response] = []
+                    while response.next is not None:
+                        if len(history) >= self.session.max_redirects:
+                            raise requests.exceptions.TooManyRedirects(
+                                f"Exceeded {self.session.max_redirects} redirects.",
+                                response=response,
+                            )
+                        next_request = response.next
+                        redirect_url = next_request.url
+                        if redirect_url is None:
+                            raise requests.exceptions.MissingSchema("Redirect target is missing")
+                        self.scope.check(redirect_url)
+                        history.append(response)
+                        redirect_settings = self.session.merge_environment_settings(
+                            redirect_url,
+                            request_kwargs.get("proxies") or {},
+                            request_kwargs.get("stream"),
+                            request_kwargs.get("verify"),
+                            request_kwargs.get("cert"),
+                        )
+                        response = self.session.send(
+                            next_request,
+                            timeout=self.timeout,
+                            allow_redirects=False,
+                            **redirect_settings,
+                        )
+                    response.history = history
                 response.response_time = time.time() - start
                 return response
             except requests.exceptions.RequestException:
@@ -1296,7 +1493,7 @@ class SecurityScanner:
         }
         self.findings.append(finding)
         self.db.save_finding(
-            target_host=self.host,
+            target_host=self.target_identity,
             endpoint=endpoint,
             vuln_type=vuln_type,
             method=method,
@@ -1376,7 +1573,7 @@ class SecurityScanner:
                 }
             )
             self.db.save_history(
-                self.host,
+                self.target_identity,
                 url,
                 method,
                 payload_name,
@@ -1394,7 +1591,7 @@ class SecurityScanner:
                     vuln_type,
                 )
 
-        self.db.save_defenses(self.host, self.defenses_detected)
+        self.db.save_defenses(self.target_identity, self.defenses_detected)
         self.save_snapshot()
         return results
 
@@ -1402,9 +1599,8 @@ class SecurityScanner:
         """Map the attack surface by crawling and extracting inputs."""
         url = urljoin(self.base_url, start_url)
 
-        try:
-            response = self.session.get(url, timeout=self.timeout)
-        except requests.exceptions.RequestException:
+        response = self._make_request("GET", url)
+        if response.status_code == 0:
             return {"error": "Could not reach target"}
 
         forms: list[dict[str, Any]] = []
@@ -1447,8 +1643,8 @@ class SecurityScanner:
         }
 
         self.attack_surface[start_url] = surface
-        self.db.save_surface(self.host, start_url, surface)
-        self.db.save_defenses(self.host, self.defenses_detected)
+        self.db.save_surface(self.target_identity, start_url, surface)
+        self.db.save_defenses(self.target_identity, self.defenses_detected)
         self.save_snapshot()
         return surface
 

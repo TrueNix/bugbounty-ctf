@@ -22,7 +22,7 @@ import contextlib
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 
 try:
     import websocket
@@ -32,6 +32,10 @@ except ImportError:
     HAS_WS = False
 
 FLAG_PATTERNS = [r"HTB\{[^}]+\}", r"flag\{[^}]+\}", r"CTF\{[^}]+\}", r"pwn\{[^}]+\}"]
+SSTI_ARITHMETIC_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
+    re.compile(r"\{\{\s*(?P<left>\d+)\s*\*\s*(?P<right>\d+)\s*\}\}"),
+    re.compile(r"\$\{\s*(?P<left>\d+)\s*\*\s*(?P<right>\d+)\s*\}"),
+)
 
 WS_INJECTION_PAYLOADS = {
     "sqli": ["'", "' OR 1=1--", "' UNION SELECT NULL--"],
@@ -71,6 +75,17 @@ def _extract_flags(text: str) -> list[str]:
     for pattern in FLAG_PATTERNS:
         flags.extend(re.findall(pattern, text, re.IGNORECASE))
     return list(set(flags))
+
+
+def _has_evaluated_ssti_output(message: str, response: str) -> bool:
+    for pattern in SSTI_ARITHMETIC_PATTERNS:
+        match = pattern.search(message)
+        if match:
+            payload = match.group(0)
+            expected = str(int(match.group("left")) * int(match.group("right")))
+            expected_token = rf"(?<![A-Za-z0-9_]){re.escape(expected)}(?![A-Za-z0-9_])"
+            return payload not in response and re.search(expected_token, response) is not None
+    return False
 
 
 class WebSocketTester:
@@ -140,7 +155,7 @@ class WebSocketTester:
             if "uid=" in response:
                 result.interesting = True
                 result.details["indicator"] = "command_output"
-            if "49" in response and "{{7*7}}" in message:
+            if _has_evaluated_ssti_output(message, response):
                 result.interesting = True
                 result.details["indicator"] = "ssti_evaluated"
 

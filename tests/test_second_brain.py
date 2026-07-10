@@ -200,7 +200,7 @@ class TestCloudFindingRecording:
         creds = get_aws_credentials(sc, ssrf_endpoint="http://t.test/fetch")
         assert creds and creds["AccessKeyId"] == "ASIA123"
         assert any(f["type"] == "ssrf_aws_credentials" for f in sc.findings)
-        assert sc.db.findings_for_host(sc.host)  # persisted
+        assert sc.db.findings_for_host(sc.target_identity)  # persisted
 
     def test_bypass_url_filter_records_finding(self) -> None:
         sc = SecurityScanner("http://t.test/", db=ScannerDB(":memory:"))

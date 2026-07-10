@@ -24,7 +24,7 @@ import time
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
 import requests
 
@@ -78,6 +78,30 @@ INPUT_FILTER_TEST_CHARS: Final = {
 }
 
 
+class _DefenseRequester(Protocol):
+    def get(self, url: str, **kwargs: Any) -> requests.Response: ...
+
+    def post(self, url: str, **kwargs: Any) -> requests.Response: ...
+
+    def request(self, method: str, url: str, **kwargs: Any) -> requests.Response: ...
+
+
+class _ScannerRequestAdapter:
+    def __init__(self, scanner: SecurityScanner) -> None:
+        self._scanner = scanner
+
+    def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        request_kwargs = dict(kwargs)
+        request_kwargs.pop("timeout", None)
+        return self._scanner._make_request(method, url, **request_kwargs)
+
+    def get(self, url: str, **kwargs: Any) -> requests.Response:
+        return self.request("GET", url, **kwargs)
+
+    def post(self, url: str, **kwargs: Any) -> requests.Response:
+        return self.request("POST", url, **kwargs)
+
+
 def _header_value(headers: Mapping[str, str], name: str) -> str | None:
     expected = name.lower()
     for header, value in headers.items():
@@ -111,7 +135,7 @@ def _detect_header_waf(headers: Mapping[str, str]) -> str | None:
 
 def _detect_waf(
     base_url: str,
-    session: requests.Session,
+    session: _DefenseRequester,
     paths: list[str] | None = None,
 ) -> dict[str, Any]:
     detected_waf: str | None = None
@@ -175,7 +199,7 @@ def _detect_security_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return security_headers
 
 
-def _detect_rate_limit(base_url: str, session: requests.Session) -> dict[str, Any]:
+def _detect_rate_limit(base_url: str, session: _DefenseRequester) -> dict[str, Any]:
     print("[*] Probing rate limit...")
     evidence: list[str] = []
     rate_limit: str | None = None
@@ -195,7 +219,7 @@ def _detect_rate_limit(base_url: str, session: requests.Session) -> dict[str, An
     return {"rate_limit": rate_limit, "evidence": evidence}
 
 
-def _detect_input_filters(base_url: str, session: requests.Session) -> list[dict[str, Any]]:
+def _detect_input_filters(base_url: str, session: _DefenseRequester) -> list[dict[str, Any]]:
     print("[*] Probing input filters...")
     input_filters: list[dict[str, Any]] = []
     try:
@@ -244,8 +268,9 @@ def detect_defenses(
         "evidence": [],
     }
 
-    # Use a fresh session for burst probing — don't contaminate scanner state
-    session = requests.Session()
+    session: _DefenseRequester = (
+        _ScannerRequestAdapter(scanner) if scanner is not None else requests.Session()
+    )
     print(f"[*] Detecting defenses on {base_url}")
 
     waf_result = _detect_waf(base_url, session, paths)

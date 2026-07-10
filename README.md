@@ -146,7 +146,9 @@ The toolkit accumulates knowledge across runs rather than starting cold:
 
 ## Multi-Agent Orchestration
 
-`SkillOrchestrator` drives a recon → research → fuzz → exploit → verify workflow:
+`SkillOrchestrator` is the current orchestration API. It builds guidance for
+the recon, research, fuzz, and exploit phases, then can run those phases through
+Hermes sub-agents with optional adversarial verification:
 
 ```python
 from bugbounty_ctf.skill_runner import SkillOrchestrator
@@ -161,6 +163,11 @@ final = runner.run_with_agents()          # lazy guidance, shared state, verific
 print(final["confirmed_findings"], final["refuted_findings"])
 ```
 
+- **Public entry points** — `get_recon_guidance()`, `get_research_guidance()`,
+  `get_fuzz_guidance()`, `get_exploit_guidance()`, `run_all_phases()`,
+  `run(mode="auto"|"fanout"|"headless", ...)`, `run_with_agents()`,
+  `fan_out(tasks)`, `verify_findings()`, `collect_results()`, and
+  `save_results()`.
 - **Lazy guidance** — each phase is built from current scanner state, so findings
   feed forward.
 - **Structured output** — sub-agents emit a `<FINDINGS>` JSON block that the
@@ -168,9 +175,10 @@ print(final["confirmed_findings"], final["refuted_findings"])
   state file + `ScannerDB`.
 - **Adversarial verification** — a panel of skeptic sub-agents tries to refute
   each finding; majority-refuted findings are dropped.
-
-`Orchestrator` (non-agent) and the `agents` module (`ReconAgent`, `FuzzAgent`,
-`ExploitAgent`, …) provide an in-process alternative.
+- **Current architecture** — `skill_runner.py` owns the `PhaseGuidance`
+  dataclass, Hermes `hermes -z` subprocess spawning, tagged findings parsing,
+  fan-out track execution, shared `ScannerDB` reload/merge, and knowledge-base
+  lesson/pattern write-back.
 
 ## Architecture
 
@@ -199,9 +207,7 @@ bugbounty_ctf/
 ├── callback_listener.py # Standalone CLI HTTP listener for XSS/SSRF callbacks
 ├── flag_hunter.py       # Filesystem flag hunting
 ├── knowledge.py         # FTS5 knowledge base + learned lessons (write-back)
-├── orchestrator.py      # In-process phase orchestrator
-├── skill_runner.py      # Hermes sub-agent orchestrator (recall + verify + write-back)
-├── agents.py            # Recon/Research/Fuzz/Exploit agents
+├── skill_runner.py      # SkillOrchestrator API + Hermes sub-agent workflow
 ├── hypothesis.py        # Hypothesis-driven testing engine
 ├── observations.py      # Observation store + next-test recommendation
 ├── session_recorder.py  # Record/replay HTTP sessions

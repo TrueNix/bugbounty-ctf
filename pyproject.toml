@@ -35,6 +35,8 @@ yaml = ["pyyaml>=6.0"]
 embed = ["sentence-transformers>=2.0"]
 ner = ["spacy>=3.7"]
 dev = [
+    "build>=1.0",
+    "hatchling>=1.0",
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "responses>=0.24",
@@ -52,12 +54,15 @@ Issues = "https://github.com/TrueNix/bugbounty-ctf/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bugbounty_ctf"]
-# Ship the bundled SecLists payload wordlists and CVE/template data as package
-# data so they survive `pip install` and the Hermes skill copy (resolved
-# relative to the package directory). These files are git-tracked and live
-# inside the package, so `artifacts` includes them — a `force-include` table
-# would re-add them and break the wheel build with a duplicate-path error.
+# Ship package-owned wordlists and data through `artifacts` so they remain
+# package data after `pip install` and the Hermes skill copy. They already live
+# under `src/bugbounty_ctf`, so they must not also be listed in `force-include`;
+# top-level `references/` lives outside the package and is intentionally
+# force-included below.
 artifacts = ["src/bugbounty_ctf/wordlists/*.txt", "src/bugbounty_ctf/data/*.json"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"references" = "bugbounty_ctf/references"
 
 [tool.hatch.build.targets.sdist]
 include = ["src", "tests", "references", "templates", "SKILL.md", "README.md"]

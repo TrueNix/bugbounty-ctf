@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import responses
 
-from bugbounty_ctf.engine import SecurityScanner
+from bugbounty_ctf.engine import ScannerDB, SecurityScanner
 from bugbounty_ctf.hypothesis import Hypothesis, HypothesisEngine
 from bugbounty_ctf.hypothesis import TestStep as TestStepData
 
@@ -144,3 +146,57 @@ class TestHypothesisEngine:
         hypotheses2 = engine2.generate_hypotheses("/fetch", method="POST", data={"name": "test"})
         ssrf_h2 = [h for h in hypotheses2 if h.vuln_type == "ssrf"]
         assert len(ssrf_h2) == 0
+
+    def test_load_prior_isolates_same_host_different_ports(self, tmp_path: Path) -> None:
+        # Given: a confirmed hypothesis was persisted for one host:port target.
+        db_path = tmp_path / "scanner.db"
+        scanner_a = SecurityScanner("http://10.1.2.3:8080", db=ScannerDB(str(db_path)))
+        HypothesisEngine(scanner_a)._persist(
+            Hypothesis(
+                vuln_type="sqli",
+                endpoint="/login",
+                param="user",
+                confidence=0.9,
+                confirmed=True,
+            )
+        )
+
+        # When: another scanner targets the same host on a different port.
+        scanner_b = SecurityScanner("http://10.1.2.3:9090", db=ScannerDB(str(db_path)))
+        prior = HypothesisEngine(scanner_b).load_prior(status="confirmed")
+
+        # Then: host-only state does not bleed across target identities.
+        assert scanner_a.host == scanner_b.host
+        assert scanner_a.target_identity != scanner_b.target_identity
+        assert prior == []
+
+    def test_load_prior_reloads_exact_target_identity(self, tmp_path: Path) -> None:
+        # Given: a confirmed hypothesis was persisted for an IP:port plus Host header context.
+        db_path = tmp_path / "scanner.db"
+        scanner_a = SecurityScanner(
+            "http://10.1.2.3:8080",
+            db=ScannerDB(str(db_path)),
+            headers={"Host": "App.One:8080"},
+        )
+        HypothesisEngine(scanner_a)._persist(
+            Hypothesis(
+                vuln_type="xss",
+                endpoint="/profile",
+                param="name",
+                confidence=0.95,
+                confirmed=True,
+            )
+        )
+
+        # When: a fresh scanner uses the same normalized target identity.
+        scanner_b = SecurityScanner(
+            "http://10.1.2.3:8080",
+            db=ScannerDB(str(db_path)),
+            headers={"host": "app.one:8080"},
+        )
+        prior = HypothesisEngine(scanner_b).load_prior(status="confirmed")
+
+        # Then: the exact target identity is the persisted reload key.
+        assert scanner_b.target_identity == scanner_a.target_identity
+        assert [p["vuln_type"] for p in prior] == ["xss"]
+        assert scanner_b.db.query_hypotheses(scanner_b.target_identity, status="confirmed") == prior
