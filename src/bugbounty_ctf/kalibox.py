@@ -231,6 +231,12 @@ class KaliBox:
         """Run an argv inside the container (no shell interpretation)."""
         return self._runtime(["exec", self.name, *argv], timeout=timeout, input=input)
 
+    def exec(
+        self, argv: Sequence[str], *, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        """Execute a literal argv through the container runtime."""
+        return self.exec_raw(argv, timeout=timeout)
+
     def run(
         self, command: str | Sequence[str], *, timeout: float | None = None
     ) -> subprocess.CompletedProcess[str]:
@@ -261,6 +267,7 @@ Usage:
   kalibox brain update [--root PATH]
   kalibox brain search QUERY... [--limit N] [--root PATH]
   kalibox brain explain CARD_ID [--root PATH]
+  kalibox -- <command...>    Run a command inside kalibox, bypassing host-side subcommands
   kalibox <command...>       Run a command inside kalibox (e.g. kalibox nmap -sCV 10.129.33.77)
   kalibox shell              Open an interactive Kali shell
   kalibox down               Stop the container
@@ -401,35 +408,42 @@ def main(argv: list[str] | None = None) -> int:
     import sys
 
     args = list(sys.argv[1:] if argv is None else argv)
+    escaped = bool(args and args[0] == "--")
 
-    if not args or args[0] in ("-h", "--help", "help"):
+    if escaped:
+        if len(args) == 1:
+            sys.stderr.write("[kalibox] usage error: -- requires a command\n")
+            return 2
+        args = args[1:]
+
+    if not args or (not escaped and args[0] in ("-h", "--help", "help")):
         sys.stdout.write(_USAGE)
         return 0
 
-    if args[0] == "brain":
+    if not escaped and args[0] == "brain":
         return _brain_main(args[1:])
 
     box = KaliBox()
 
     sub = args[0]
     try:
-        if sub == "up":
+        if not escaped and sub == "up":
             box.ensure()
             sys.stdout.write(f"[kalibox] up: {box.name} ({box.image}), workdir {box.workdir}\n")
             return 0
-        if sub == "status":
+        if not escaped and sub == "status":
             for k, v in box.status().items():
                 sys.stdout.write(f"  {k}: {v}\n")
             return 0
-        if sub == "down":
+        if not escaped and sub == "down":
             box.stop()
             sys.stdout.write(f"[kalibox] stopped: {box.name}\n")
             return 0
-        if sub == "destroy":
+        if not escaped and sub == "destroy":
             box.destroy()
             sys.stdout.write(f"[kalibox] destroyed: {box.name}\n")
             return 0
-        if sub == "shell":
+        if not escaped and sub == "shell":
             rest = args[1:]
             if not rest:
                 box.start()
@@ -446,7 +460,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # Default: run the whole argv as a command inside the container.
         box.ensure(provision=True)
-        result = box.run(args)
+        result = box.exec(args) if escaped else box.run(args)
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
         return result.returncode

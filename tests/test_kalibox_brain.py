@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -123,6 +124,82 @@ def test_help_documents_brain_without_constructing_container(
     for command in ("status", "update", "search", "explain"):
         assert command in brain.out
     assert brain.err == ""
+
+
+def test_top_level_help_documents_explicit_container_escape(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        kalibox,
+        "KaliBox",
+        lambda: (_ for _ in ()).throw(AssertionError("constructed KaliBox")),
+    )
+
+    assert kalibox.main(["--help"]) == 0
+    captured = capsys.readouterr()
+    assert "kalibox -- <command...>" in captured.out
+    assert "host-side" in captured.out
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    "escaped_argv",
+    [
+        ["brain", "status"],
+        ["status"],
+        ["up"],
+        ["down"],
+        ["destroy"],
+        ["shell"],
+        ["--help"],
+    ],
+)
+def test_double_dash_bypasses_every_host_subcommand_with_unchanged_argv(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    escaped_argv: list[str],
+) -> None:
+    calls: list[tuple[object, ...]] = []
+
+    class FakeKaliBox:
+        class DockerNotFoundError(RuntimeError):
+            pass
+
+        def ensure(self, *, provision: bool = True) -> FakeKaliBox:
+            calls.append(("ensure", provision))
+            return self
+
+        def exec(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+            calls.append(("exec", argv))
+            return subprocess.CompletedProcess(argv, 0, "container output\n", "")
+
+    monkeypatch.setattr(kalibox, "KaliBox", FakeKaliBox)
+    monkeypatch.setattr(
+        kalibox,
+        "BrainStore",
+        lambda root=None: (_ for _ in ()).throw(AssertionError("constructed BrainStore")),
+    )
+    assert kalibox.main(["--", *escaped_argv]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "container output\n"
+    assert captured.err == ""
+    assert calls == [("ensure", True), ("exec", escaped_argv)]
+
+
+def test_bare_double_dash_is_usage_error_without_construction(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        kalibox,
+        "KaliBox",
+        lambda: (_ for _ in ()).throw(AssertionError("constructed KaliBox")),
+    )
+
+    assert kalibox.main(["--"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("[kalibox] usage error:")
+    assert "command" in captured.err
 
 
 def test_status_emits_deterministic_json_and_uses_root(
