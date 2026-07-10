@@ -250,6 +250,19 @@ def test_clean_install_status_search_and_explain(tmp_path: Path) -> None:
         result.changed = False  # type: ignore[misc]
 
 
+def test_multi_term_natural_query_matches_any_sanitized_term(tmp_path: Path) -> None:
+    cards = [
+        _card(1, title="Reconnaissance attack surface mapping"),
+        _card(2, title="Nginx configuration guide"),
+    ]
+    store = BrainStore(tmp_path / "brain", fetcher=_release_fetcher(tmp_path, cards=cards))
+    store.update()
+
+    matches = store.search("reconnaissance attack surface mapping nginx Python")
+
+    assert [card.id for card in matches] == ["card-1", "card-2"]
+
+
 def test_same_version_fetches_only_manifest_and_returns_unchanged(tmp_path: Path) -> None:
     fetcher = _release_fetcher(tmp_path)
     store = BrainStore(tmp_path / "brain", fetcher=fetcher)
