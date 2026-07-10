@@ -90,7 +90,7 @@ class FakeSession:
 
 def _card(number: int, *, title: str = "SQL injection playbook") -> tuple[object, ...]:
     return (
-        f"card-{number}",
+        f"card-{number:012x}",
         title,
         "Safely identify SQL injection with parameterized verification.",
         f"https://research.example/card-{number}",
@@ -102,8 +102,12 @@ def _card(number: int, *, title: str = "SQL injection playbook") -> tuple[object
         '["CVE-2026-0001"]',
         '["error-based", "boolean-based"]',
         "high",
-        "authorized-testing-only",
+        "public",
     )
+
+
+def _fts_row(card: tuple[object, ...]) -> tuple[object, ...]:
+    return (card[0], card[1], card[2], card[8], card[9], card[10])
 
 
 def _database_bytes(
@@ -113,13 +117,16 @@ def _database_bytes(
     metadata_overrides: dict[str, str] | None = None,
     name: str = "producer.db",
     include_fts: bool = True,
+    fts_rows: list[tuple[object, ...]] | None = None,
+    cards_primary_key: bool = True,
 ) -> bytes:
     rows = [_card(1)] if cards is None else cards
     path = tmp_path / name
     connection = sqlite3.connect(path)
-    connection.executescript(
-        """
-        CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    connection.execute("CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    if cards_primary_key:
+        connection.execute(
+            """
         CREATE TABLE cards(
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
@@ -134,9 +141,29 @@ def _database_bytes(
             techniques TEXT NOT NULL,
             confidence TEXT NOT NULL,
             safety TEXT NOT NULL
-        );
+        )
         """
-    )
+        )
+    else:
+        connection.execute(
+            """
+        CREATE TABLE cards(
+            id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            source_name TEXT NOT NULL,
+            published_at TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            content_sha256 TEXT NOT NULL,
+            products TEXT NOT NULL,
+            cves TEXT NOT NULL,
+            techniques TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            safety TEXT NOT NULL
+        )
+        """
+        )
     if include_fts:
         connection.execute(
             "CREATE VIRTUAL TABLE cards_fts USING fts5("
@@ -166,7 +193,7 @@ def _database_bytes(
             INSERT INTO cards_fts(id, title, summary, products, cves, techniques)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            [(row[0], row[1], row[2], row[8], row[9], row[10]) for row in rows],
+            [_fts_row(row) for row in rows] if fts_rows is None else fts_rows,
         )
     connection.commit()
     connection.close()
@@ -235,7 +262,7 @@ def test_clean_install_status_search_and_explain(tmp_path: Path) -> None:
     matches = store.search("SQL injection", limit=5)
     assert len(matches) == 1
     card = matches[0]
-    assert card.id == "card-1"
+    assert card.id == "card-000000000001"
     assert card.title == "SQL injection playbook"
     assert card.source_url == "https://research.example/card-1"
     assert card.source_name == "Example Research"
@@ -243,11 +270,39 @@ def test_clean_install_status_search_and_explain(tmp_path: Path) -> None:
     assert card.cves == ("CVE-2026-0001",)
     assert card.techniques == ("error-based", "boolean-based")
     assert card.confidence == "high"
-    assert card.safety == "authorized-testing-only"
-    assert store.explain("card-1") == card
+    assert card.safety == "public"
+    assert store.explain("card-000000000001") == card
     assert store.explain("missing") is None
     with pytest.raises(FrozenInstanceError):
         result.changed = False  # type: ignore[misc]
+
+
+def test_v010_timezone_offsets_and_enum_values_remain_compatible(tmp_path: Path) -> None:
+    generated_at = "2026-07-10T12:00:00+02:00"
+    card = list(_card(1))
+    card[5] = "2026-07-01T03:00:00+03:00"
+    card[6] = "2026-07-09T04:00:00-04:00"
+    card[11] = "low"
+    card[12] = "sanitized"
+    database = _database_bytes(
+        tmp_path,
+        cards=[tuple(card)],
+        metadata_overrides={"generated_at": generated_at},
+    )
+    store = BrainStore(
+        tmp_path / "brain",
+        fetcher=FakeFetcher(
+            {
+                MANIFEST_URL: _manifest(database, generated_at=generated_at),
+                DB_URL: database,
+            }
+        ),
+    )
+
+    result = store.update()
+
+    assert result.status.generated_at == generated_at
+    assert store.search("SQL")[0].safety == "sanitized"
 
 
 def test_multi_term_natural_query_matches_any_sanitized_term(tmp_path: Path) -> None:
@@ -260,7 +315,7 @@ def test_multi_term_natural_query_matches_any_sanitized_term(tmp_path: Path) -> 
 
     matches = store.search("reconnaissance attack surface mapping nginx Python")
 
-    assert [card.id for card in matches] == ["card-1", "card-2"]
+    assert [card.id for card in matches] == ["card-000000000001", "card-000000000002"]
 
 
 def test_same_version_fetches_only_manifest_and_returns_unchanged(tmp_path: Path) -> None:
@@ -288,7 +343,14 @@ def test_same_version_fetches_only_manifest_and_returns_unchanged(tmp_path: Path
         {"card_count": -1},
         {"card_count": True},
         {"generated_at": ""},
+        {"generated_at": "2026-07-10T10:00:00"},
+        {"generated_at": "2026-07-10"},
+        {"generated_at": "not-a-timestamp"},
+        {"generated_at": "2" * 41},
         {"source_sha256": ""},
+        {"source_sha256": "A" * 64},
+        {"source_sha256": "b" * 63},
+        {"source_sha256": "g" * 64},
         {"unexpected": "field"},
     ],
 )
@@ -304,6 +366,31 @@ def test_incompatible_or_non_contract_manifest_is_rejected(
     assert raised.value.code == "manifest_invalid"
     assert not (tmp_path / "brain").exists()
     assert [call[0] for call in fetcher.calls] == [MANIFEST_URL]
+
+
+def test_malformed_manifest_preserves_existing_state_and_version(tmp_path: Path) -> None:
+    root = tmp_path / "brain"
+    initial_fetcher = _release_fetcher(tmp_path)
+    store = BrainStore(root, fetcher=initial_fetcher)
+    installed = store.update().status
+    state_before = (root / "state.json").read_bytes()
+    names_before = {path.name for path in root.iterdir()}
+    malformed_fetcher = FakeFetcher(
+        {
+            MANIFEST_URL: _manifest(
+                initial_fetcher.responses[DB_URL], generated_at="2026-07-10T10:00:00"
+            )
+        }
+    )
+
+    with pytest.raises(BrainError) as raised:
+        BrainStore(root, fetcher=malformed_fetcher).update()
+
+    assert raised.value.code == "manifest_invalid"
+    assert (root / "state.json").read_bytes() == state_before
+    assert {path.name for path in root.iterdir()} == names_before
+    assert store.status() == installed
+    assert [call[0] for call in malformed_fetcher.calls] == [MANIFEST_URL]
 
 
 @pytest.mark.parametrize(
@@ -391,6 +478,128 @@ def test_invalid_sqlite_schema_metadata_or_card_count_is_rejected(
     assert not list((tmp_path / "brain").glob(".database-*.tmp"))
 
 
+def _assert_database_rejected_without_publication(
+    tmp_path: Path, database: bytes, *, card_count: int
+) -> None:
+    root = tmp_path / "brain"
+    store = BrainStore(root, fetcher=_release_fetcher(tmp_path))
+    installed = store.update().status
+    state_before = (root / "state.json").read_bytes()
+    names_before = {path.name for path in root.iterdir()}
+    malformed_fetcher = FakeFetcher(
+        {MANIFEST_URL: _manifest(database, card_count=card_count), DB_URL: database}
+    )
+
+    with pytest.raises(BrainError) as raised:
+        BrainStore(root, fetcher=malformed_fetcher).update()
+
+    assert raised.value.code == "database_invalid"
+    assert (root / "state.json").read_bytes() == state_before
+    assert {path.name for path in root.iterdir()} == names_before
+    assert store.status() == installed
+    assert store.search("SQL")[0].id == "card-000000000001"
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        (0, "card-1"),
+        (0, "Uppercase-slug-abcdef123456"),
+        (1, ""),
+        (1, "x" * 141),
+        (2, ""),
+        (2, "x" * 1_001),
+        (3, "http://research.example/card"),
+        (3, "https:///missing-host"),
+        (3, "https://user:password@research.example/card"),
+        (3, "x" * 2_049),
+        (4, ""),
+        (4, "x" * 121),
+        (5, "not-a-timestamp"),
+        (5, "2026-07-01T00:00:00"),
+        (5, "2" * 41),
+        (6, "2026-07-09T00:00:00"),
+        (7, "A" * 64),
+        (7, "a" * 63),
+        (8, "not-json"),
+        (8, json.dumps(["product"] * 21)),
+        (8, json.dumps([1])),
+        (8, json.dumps([""])),
+        (9, json.dumps(["CVE-2026-123"])),
+        (9, json.dumps(["CVE-2026-0001"] * 51)),
+        (10, json.dumps(["technique"] * 31)),
+        (11, "certain"),
+        (12, "authorized-testing-only"),
+    ],
+)
+def test_malformed_card_row_is_rejected_before_state_publication(
+    tmp_path: Path, column: int, value: object
+) -> None:
+    card = list(_card(2, title="Cross-site scripting"))
+    card[column] = value
+    database = _database_bytes(tmp_path, cards=[tuple(card)], name="malformed-card.db")
+
+    _assert_database_rejected_without_publication(tmp_path, database, card_count=1)
+
+
+@pytest.mark.parametrize("fts_column", range(1, 6))
+def test_fts_mismatched_selected_value_is_rejected_before_state_publication(
+    tmp_path: Path, fts_column: int
+) -> None:
+    card = _card(2, title="Cross-site scripting")
+    fts_row = list(_fts_row(card))
+    fts_row[fts_column] = f"mismatched-{fts_column}"
+    database = _database_bytes(
+        tmp_path,
+        cards=[card],
+        name="mismatched-fts.db",
+        fts_rows=[tuple(fts_row)],
+    )
+
+    _assert_database_rejected_without_publication(tmp_path, database, card_count=1)
+
+
+def test_fts_duplicate_id_and_missing_card_are_rejected_before_state_publication(
+    tmp_path: Path,
+) -> None:
+    cards = [_card(2), _card(3)]
+    duplicate = _fts_row(cards[0])
+    database = _database_bytes(
+        tmp_path,
+        cards=cards,
+        name="duplicate-fts.db",
+        fts_rows=[duplicate, duplicate],
+    )
+
+    _assert_database_rejected_without_publication(tmp_path, database, card_count=2)
+
+
+def test_duplicate_card_ids_are_rejected_before_state_publication(tmp_path: Path) -> None:
+    card = _card(2)
+    database = _database_bytes(
+        tmp_path,
+        cards=[card, card],
+        name="duplicate-cards.db",
+        cards_primary_key=False,
+    )
+
+    _assert_database_rejected_without_publication(tmp_path, database, card_count=2)
+
+
+def test_fts_missing_and_extra_ids_are_rejected_before_state_publication(tmp_path: Path) -> None:
+    card = _card(2)
+    extra = list(_fts_row(card))
+    extra[0] = "extra-card-abcdef123456"
+    database = _database_bytes(
+        tmp_path,
+        cards=[card],
+        name="missing-extra-fts.db",
+        fts_rows=[tuple(extra)],
+    )
+
+    _assert_database_rejected_without_publication(tmp_path, database, card_count=1)
+
+
 def test_failed_new_release_preserves_previous_state_and_database(tmp_path: Path) -> None:
     root = tmp_path / "brain"
     first_fetcher = _release_fetcher(tmp_path)
@@ -418,7 +627,7 @@ def test_failed_new_release_preserves_previous_state_and_database(tmp_path: Path
     assert (root / "state.json").read_bytes() == state_before
     assert first.status.path.read_bytes() == database_before
     assert {path.name for path in root.iterdir()} == names_before
-    assert first_store.search("SQL")[0].id == "card-1"
+    assert first_store.search("SQL")[0].id == "card-000000000001"
 
 
 def test_successful_new_release_keeps_previous_database_for_rollback(tmp_path: Path) -> None:
@@ -589,12 +798,12 @@ def test_malformed_card_json_arrays_fail_closed(tmp_path: Path) -> None:
     malformed[8] = "not-json"
     cards = [tuple(malformed)]
     store = BrainStore(tmp_path / "brain", fetcher=_release_fetcher(tmp_path, cards=cards))
-    store.update()
 
     with pytest.raises(BrainError) as raised:
-        store.search("SQL")
+        store.update()
 
     assert raised.value.code == "database_invalid"
+    assert not (tmp_path / "brain" / "state.json").exists()
 
 
 @pytest.mark.parametrize(

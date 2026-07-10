@@ -12,6 +12,7 @@ import tempfile
 from collections.abc import Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Final, Protocol, cast
 from urllib.parse import urljoin, urlsplit
@@ -34,6 +35,8 @@ COMPATIBILITY: Final = "bugbounty-brain-v1"
 DATABASE_FILENAME: Final = "reference_knowledge.db"
 
 _SHA256_RE: Final = re.compile(r"[0-9a-f]{64}\Z")
+_CARD_ID_RE: Final = re.compile(r"[a-z0-9][a-z0-9-]{2,83}-[0-9a-f]{12}\Z")
+_CVE_RE: Final = re.compile(r"CVE-[0-9]{4}-[0-9]{4,}\Z")
 _STATE_FILENAME: Final = "state.json"
 _STATE_MAX_BYTES: Final = 64 * 1024
 _MANIFEST_KEYS: Final = frozenset(
@@ -72,6 +75,16 @@ _TRUSTED_DOWNLOAD_HOSTS: Final = frozenset(
 _REDIRECT_STATUSES: Final = frozenset({301, 302, 303, 307, 308})
 _MAX_REDIRECTS: Final = 5
 _STREAM_CHUNK_BYTES: Final = 64 * 1024
+_TITLE_MAX_CHARS: Final = 140
+_SUMMARY_MAX_CHARS: Final = 1_000
+_SOURCE_URL_MAX_CHARS: Final = 2_048
+_SOURCE_NAME_MAX_CHARS: Final = 120
+_TIMESTAMP_MAX_CHARS: Final = 40
+_PRODUCTS_MAX_ITEMS: Final = 20
+_CVES_MAX_ITEMS: Final = 50
+_TECHNIQUES_MAX_ITEMS: Final = 30
+_CONFIDENCE_VALUES: Final = frozenset({"low", "medium", "high"})
+_SAFETY_VALUES: Final = frozenset({"public", "sanitized"})
 
 
 class Fetcher(Protocol):
@@ -629,9 +642,9 @@ def _parse_manifest_document(document: dict[str, object], error_code: str) -> _M
         and type(card_count) is int
         and card_count >= 0
         and isinstance(generated_at, str)
-        and bool(generated_at)
+        and _is_iso_timestamp(generated_at)
         and isinstance(source_sha256, str)
-        and bool(source_sha256)
+        and _SHA256_RE.fullmatch(source_sha256) is not None
     )
     if not valid:
         raise _state_error() if error_code == "state_invalid" else _manifest_error()
@@ -652,6 +665,17 @@ def _manifest_error() -> BrainError:
         "The public-brain manifest is malformed or incompatible with this consumer.",
         "Keep the current version and verify the producer release.",
     )
+
+
+def _is_iso_timestamp(value: str) -> bool:
+    if len(value) > _TIMESTAMP_MAX_CHARS or "T" not in value:
+        return False
+    normalized = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
 
 
 def _manifest_document(manifest: _Manifest) -> dict[str, object]:
@@ -713,11 +737,20 @@ def _validate_database(path: Path, manifest: _Manifest) -> None:
         quick_check = connection.execute("PRAGMA quick_check").fetchall()
         if quick_check != [("ok",)]:
             raise _database_error()
-        if _table_columns(connection, "metadata") != ("key", "value"):
+        metadata_columns = tuple(
+            cast("str", row[1]) for row in connection.execute("PRAGMA table_info(metadata)")
+        )
+        cards_columns = tuple(
+            cast("str", row[1]) for row in connection.execute("PRAGMA table_info(cards)")
+        )
+        fts_columns = tuple(
+            cast("str", row[1]) for row in connection.execute("PRAGMA table_info(cards_fts)")
+        )
+        if metadata_columns != ("key", "value"):
             raise _database_error()
-        if _table_columns(connection, "cards") != _CARD_COLUMNS:
+        if cards_columns != _CARD_COLUMNS:
             raise _database_error()
-        if _table_columns(connection, "cards_fts") != _FTS_COLUMNS:
+        if fts_columns != _FTS_COLUMNS:
             raise _database_error()
         fts_row = connection.execute(
             "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'cards_fts'"
@@ -748,9 +781,49 @@ def _validate_database(path: Path, manifest: _Manifest) -> None:
             or metadata != expected_metadata
         ):
             raise _database_error()
-        card_count = connection.execute("SELECT COUNT(*) FROM cards").fetchone()
-        fts_count = connection.execute("SELECT COUNT(*) FROM cards_fts").fetchone()
-        if card_count != (manifest.card_count,) or fts_count != (manifest.card_count,):
+        validated_card_count = 0
+        for row in connection.execute(
+            """
+            SELECT id, title, summary, source_url, source_name, published_at,
+                   fetched_at, content_sha256, products, cves, techniques,
+                   confidence, safety
+            FROM cards
+            """
+        ):
+            _card_from_row(row)
+            validated_card_count += 1
+
+        card_identity_counts = connection.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT id) FROM cards"
+        ).fetchone()
+        fts_identity_counts = connection.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT id) FROM cards_fts"
+        ).fetchone()
+        expected_counts = (manifest.card_count, manifest.card_count)
+        if (
+            validated_card_count != manifest.card_count
+            or card_identity_counts != expected_counts
+            or fts_identity_counts != expected_counts
+        ):
+            raise _database_error()
+
+        missing_fts_row = connection.execute(
+            """
+            SELECT id, title, summary, products, cves, techniques FROM cards
+            EXCEPT
+            SELECT id, title, summary, products, cves, techniques FROM cards_fts
+            LIMIT 1
+            """
+        ).fetchone()
+        extra_fts_row = connection.execute(
+            """
+            SELECT id, title, summary, products, cves, techniques FROM cards_fts
+            EXCEPT
+            SELECT id, title, summary, products, cves, techniques FROM cards
+            LIMIT 1
+            """
+        ).fetchone()
+        if missing_fts_row is not None or extra_fts_row is not None:
             raise _database_error()
     except BrainError:
         raise
@@ -758,10 +831,6 @@ def _validate_database(path: Path, manifest: _Manifest) -> None:
         raise _database_error() from None
     finally:
         connection.close()
-
-
-def _table_columns(connection: sqlite3.Connection, table: str) -> tuple[str, ...]:
-    return tuple(cast("str", row[1]) for row in connection.execute(f"PRAGMA table_info({table})"))
 
 
 def _database_error() -> BrainError:
@@ -805,30 +874,88 @@ def _card_from_row(row: tuple[object, ...]) -> BrainCard:
     text_values = row[:8] + row[11:]
     if any(not isinstance(value, str) for value in text_values):
         raise _database_error()
+    card_id = cast("str", row[0])
+    title = cast("str", row[1])
+    summary = cast("str", row[2])
+    source_url = cast("str", row[3])
+    source_name = cast("str", row[4])
+    published_at = cast("str", row[5])
+    fetched_at = cast("str", row[6])
+    content_sha256 = cast("str", row[7])
+    confidence = cast("str", row[11])
+    safety = cast("str", row[12])
+    if (
+        _CARD_ID_RE.fullmatch(card_id) is None
+        or not _is_bounded_nonempty(title, _TITLE_MAX_CHARS)
+        or not _is_bounded_nonempty(summary, _SUMMARY_MAX_CHARS)
+        or not _is_https_source_url(source_url)
+        or not _is_bounded_nonempty(source_name, _SOURCE_NAME_MAX_CHARS)
+        or not _is_iso_timestamp(published_at)
+        or not _is_iso_timestamp(fetched_at)
+        or _SHA256_RE.fullmatch(content_sha256) is None
+        or confidence not in _CONFIDENCE_VALUES
+        or safety not in _SAFETY_VALUES
+    ):
+        raise _database_error()
     return BrainCard(
-        id=cast("str", row[0]),
-        title=cast("str", row[1]),
-        summary=cast("str", row[2]),
-        source_url=cast("str", row[3]),
-        source_name=cast("str", row[4]),
-        published_at=cast("str", row[5]),
-        fetched_at=cast("str", row[6]),
-        content_sha256=cast("str", row[7]),
-        products=_json_string_array(row[8]),
-        cves=_json_string_array(row[9]),
-        techniques=_json_string_array(row[10]),
-        confidence=cast("str", row[11]),
-        safety=cast("str", row[12]),
+        id=card_id,
+        title=title,
+        summary=summary,
+        source_url=source_url,
+        source_name=source_name,
+        published_at=published_at,
+        fetched_at=fetched_at,
+        content_sha256=content_sha256,
+        products=_json_string_array(row[8], _PRODUCTS_MAX_ITEMS),
+        cves=_json_string_array(row[9], _CVES_MAX_ITEMS, require_cves=True),
+        techniques=_json_string_array(row[10], _TECHNIQUES_MAX_ITEMS),
+        confidence=confidence,
+        safety=safety,
     )
 
 
-def _json_string_array(value: object) -> tuple[str, ...]:
+def _is_bounded_nonempty(value: str, max_chars: int) -> bool:
+    return bool(value) and len(value) <= max_chars
+
+
+def _is_https_source_url(value: str) -> bool:
+    if (
+        not _is_bounded_nonempty(value, _SOURCE_URL_MAX_CHARS)
+        or any(ord(character) <= 32 for character in value)
+        or "\\" in value
+    ):
+        return False
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        username = parsed.username
+        password = parsed.password
+        _ = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https" and hostname is not None and username is None and password is None
+    )
+
+
+def _json_string_array(
+    value: object, max_items: int, *, require_cves: bool = False
+) -> tuple[str, ...]:
     if not isinstance(value, str):
         raise _database_error()
     try:
         decoded = json.loads(value)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         raise _database_error() from None
-    if not isinstance(decoded, list) or any(not isinstance(item, str) for item in decoded):
+    if (
+        not isinstance(decoded, list)
+        or len(decoded) > max_items
+        or any(not isinstance(item, str) or not _is_clean_list_member(item) for item in decoded)
+        or (require_cves and any(_CVE_RE.fullmatch(item) is None for item in decoded))
+    ):
         raise _database_error()
-    return tuple(decoded)
+    return tuple(cast("list[str]", decoded))
+
+
+def _is_clean_list_member(value: str) -> bool:
+    return value == value.strip() != "" and not any(ord(character) < 32 for character in value)
