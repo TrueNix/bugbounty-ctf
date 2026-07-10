@@ -23,8 +23,9 @@ from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
+from bugbounty_ctf.brain import BrainCard, BrainError, BrainStore
 from bugbounty_ctf.engine import SecurityScanner
 from bugbounty_ctf.knowledge import KnowledgeBase
 from bugbounty_ctf.recon import (
@@ -68,6 +69,22 @@ _CAPABILITY_TO_TECHNIQUES: dict[str, tuple[str, ...]] = {
 SCANNER_CONTEXT_ENV: Final = "BUGBOUNTY_CTF_SCANNER_CONTEXT"
 HERMES_ERROR_STDERR_LIMIT: Final = 500
 PROMPT_ERROR_FRAGMENT_MIN_LEN: Final = 16
+PUBLIC_BRAIN_CARD_LIMIT: Final = 5
+PUBLIC_BRAIN_QUERY_MAX_LEN: Final = 240
+PUBLIC_BRAIN_CARD_TEXT_MAX_LEN: Final = 768
+PUBLIC_BRAIN_SECTION_MAX_LEN: Final = 4096
+_PUBLIC_BRAIN_PHASE_INTENTS: Final[dict[str, str]] = {
+    "recon": "reconnaissance attack surface mapping",
+    "research": "vulnerability research methodology",
+    "fuzz": "payload testing vulnerability detection",
+    "exploit": "exploit chaining privilege escalation",
+}
+
+
+class BrainSearchStore(Protocol):
+    """Read-only seam for installed public-brain retrieval."""
+
+    def search(self, query: str, limit: int = 5) -> Iterable[BrainCard]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +175,8 @@ class PhaseGuidance:
     state_file: str = ""
     db_path: str = ""
     scanner_context_env_var: str = ""
+    # Public cards are immutable and stay separate from private engagement RAG.
+    public_brain_cards: tuple[BrainCard, ...] = ()
 
 
 class SkillOrchestrator:
@@ -180,12 +199,14 @@ class SkillOrchestrator:
         *,
         scanner: SecurityScanner | None = None,
         knowledge_base: KnowledgeBase | None = None,
+        brain_store: BrainSearchStore | None = None,
         delay: float = 0.3,
         max_consecutive_failures: int = 3,
     ) -> None:
         self.target_url = target_url.rstrip("/")
         self.scanner = scanner or SecurityScanner(target_url, delay=delay)
         self.kb = knowledge_base or KnowledgeBase()
+        self.brain_store = brain_store if brain_store is not None else BrainStore()
         self.max_consecutive_failures = max_consecutive_failures
         self.current_phase = "recon"
         # Surface the run dispatched on — reused by :meth:`_writeback_pattern`
@@ -210,6 +231,28 @@ class SkillOrchestrator:
                 f"{render(r['filename'])} > {render(r['section'])}: {render(r['snippet'], maxlen=120)}"
             )
         return "\n".join(lines)
+
+    @staticmethod
+    def _public_brain_query(phase: str, discovered: dict[str, Any]) -> str:
+        """Build a bounded public lookup from phase intent and surface tech only."""
+        parts = [_PUBLIC_BRAIN_PHASE_INTENTS[phase]]
+        seen: set[str] = set()
+        for raw_hint in discovered.get("tech_hints", [])[:8]:
+            hint = re.sub(r"\s+", " ", str(raw_hint)).strip()[:60]
+            folded = hint.casefold()
+            if hint and folded not in seen:
+                seen.add(folded)
+                parts.append(hint)
+        return " ".join(parts)[:PUBLIC_BRAIN_QUERY_MAX_LEN]
+
+    def _query_public_brain(self, phase: str, discovered: dict[str, Any]) -> tuple[BrainCard, ...]:
+        """Read installed public cards, failing open only for typed brain failures."""
+        query = self._public_brain_query(phase, discovered)
+        try:
+            cards = tuple(self.brain_store.search(query, limit=PUBLIC_BRAIN_CARD_LIMIT))
+        except BrainError:
+            return ()
+        return cards[:PUBLIC_BRAIN_CARD_LIMIT]
 
     def _format_state(self) -> str:
         summary = self.scanner.get_summary()
@@ -494,9 +537,10 @@ class SkillOrchestrator:
     def get_recon_guidance(self) -> PhaseGuidance:
         self.current_phase = "recon"
         rag = self._query_rag("reconnaissance attack surface mapping web application")
+        discovered = self._format_discovered()
         return PhaseGuidance(
             phase="recon",
-            discovered=self._format_discovered(),
+            discovered=discovered,
             available_tools=[
                 "scanner.map_surface(path)",
                 "detect_defenses(url, scanner=scanner)",
@@ -510,6 +554,7 @@ class SkillOrchestrator:
             prior_observations=self._recall_observations(),
             dead_end_threshold=self.max_consecutive_failures,
             recalled_patterns=self._recall_patterns(),
+            public_brain_cards=self._query_public_brain("recon", discovered),
         )
 
     def get_research_guidance(self) -> PhaseGuidance:
@@ -523,9 +568,10 @@ class SkillOrchestrator:
             f"{render(m['filename'])} > {render(m['section'])}: {render(m['snippet'], maxlen=120)}"
             for m in methodology[:10]
         ]
+        discovered = self._format_discovered()
         return PhaseGuidance(
             phase="research",
-            discovered=self._format_discovered(),
+            discovered=discovered,
             available_tools=[
                 "kb.search(query)",
                 "kb.suggest_methodology(tech_hints)",
@@ -538,14 +584,16 @@ class SkillOrchestrator:
             prior_dead_ends=self._recall_dead_ends(),
             prior_observations=self._recall_observations(),
             dead_end_threshold=self.max_consecutive_failures,
+            public_brain_cards=self._query_public_brain("research", discovered),
         )
 
     def get_fuzz_guidance(self) -> PhaseGuidance:
         self.current_phase = "fuzz"
         rag = self._query_rag("payload testing vulnerability detection")
+        discovered = self._format_discovered()
         return PhaseGuidance(
             phase="fuzz",
-            discovered=self._format_discovered(),
+            discovered=discovered,
             available_tools=[
                 "scanner.scan_endpoint(url, method, params/data)",
                 "test_ssrf(url, method, param_name, scanner, url_suffix)",
@@ -567,14 +615,16 @@ class SkillOrchestrator:
             previous_findings=self.scanner.findings,
             prior_dead_ends=self._recall_dead_ends(),
             dead_end_threshold=self.max_consecutive_failures,
+            public_brain_cards=self._query_public_brain("fuzz", discovered),
         )
 
     def get_exploit_guidance(self) -> PhaseGuidance:
         self.current_phase = "exploit"
         rag = self._query_rag("exploit chaining privilege escalation")
+        discovered = self._format_discovered()
         return PhaseGuidance(
             phase="exploit",
-            discovered=self._format_discovered(),
+            discovered=discovered,
             available_tools=[
                 "get_aws_credentials(scanner)",
                 "generate_aws_presigned_url(service, action, ...)",
@@ -588,6 +638,7 @@ class SkillOrchestrator:
             prior_dead_ends=self._recall_dead_ends(),
             dead_end_threshold=self.max_consecutive_failures,
             recalled_patterns=self._recall_patterns(),
+            public_brain_cards=self._query_public_brain("exploit", discovered),
         )
 
     def collect_results(self) -> dict[str, Any]:
@@ -890,6 +941,39 @@ class SkillOrchestrator:
         return lines
 
     @staticmethod
+    def _render_public_brain(guidance: PhaseGuidance) -> list[str]:
+        """Render bounded public provenance as explicitly untrusted reference text."""
+        if not guidance.public_brain_cards:
+            return []
+
+        lines = [
+            "",
+            "## PUBLIC, UNTRUSTED reference knowledge",
+            "Validate every item against this target before using it.",
+        ]
+        for card in guidance.public_brain_cards[:PUBLIC_BRAIN_CARD_LIMIT]:
+            # Every externally sourced leaf passes through the taint renderer,
+            # then through an output cap that remains firm if render changes.
+            title = render(card.title, maxlen=96)[:96]
+            summary = render(card.summary, maxlen=240)[:240]
+            source_name = render(card.source_name, maxlen=80)[:80]
+            source_url = render(card.source_url, maxlen=220)[:220]
+            published_at = render(card.published_at, maxlen=32)[:32]
+            card_text = "\n".join(
+                [
+                    f"  - Title: {title}",
+                    f"    Summary: {summary}",
+                    f"    Source: {source_name}",
+                    f"    URL: {source_url}",
+                    f"    Published: {published_at}",
+                ]
+            )[:PUBLIC_BRAIN_CARD_TEXT_MAX_LEN]
+            lines.extend(["", card_text])
+
+        section = "\n".join(lines)[:PUBLIC_BRAIN_SECTION_MAX_LEN]
+        return section.splitlines()
+
+    @staticmethod
     def _render_proven_patterns(guidance: PhaseGuidance) -> list[str]:
         lines: list[str] = []
         for pattern in guidance.recalled_patterns[:2]:
@@ -1042,6 +1126,7 @@ class SkillOrchestrator:
             f"You are a security testing agent for the {guidance.phase} phase.",
             *SkillOrchestrator._render_target_info(guidance),
             *SkillOrchestrator._render_available_tools(guidance),
+            *SkillOrchestrator._render_public_brain(guidance),
             *SkillOrchestrator._render_proven_patterns(guidance),
             *SkillOrchestrator._render_prior_memory(guidance),
             *SkillOrchestrator._render_prior_hypotheses(guidance),
