@@ -796,7 +796,7 @@ def _require_installed_path(status: BrainStatus) -> Path:
 
 def _safe_fts_query(query: str) -> str:
     terms = re.findall(r"\w+", query, flags=re.UNICODE)
-    return " AND ".join(f'"{term[:128]}"' for term in terms[:32] if term)
+    return " OR ".join(f'"{term[:128]}"' for term in terms[:32] if term)
 
 
 def _card_from_row(row: tuple[object, ...]) -> BrainCard:
