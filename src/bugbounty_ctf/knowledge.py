@@ -166,6 +166,18 @@ class KnowledgeBase:
                 vec TEXT NOT NULL
             )
         """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS patterns (
+                id INTEGER PRIMARY KEY,
+                vuln_class TEXT NOT NULL,
+                technique TEXT NOT NULL,
+                tech_stack TEXT NOT NULL DEFAULT '[]',
+                target TEXT DEFAULT '',
+                payout REAL DEFAULT 0,
+                notes TEXT DEFAULT '',
+                created_at TEXT
+            )
+        """)
         self.conn.commit()
 
     def _index_if_empty(self) -> None:
@@ -379,7 +391,7 @@ class KnowledgeBase:
             (query,),
         ).fetchall()
 
-        return [
+        reference_results = [
             {
                 "filename": row["filename"],
                 "section": row["section"],
@@ -388,6 +400,117 @@ class KnowledgeBase:
             }
             for row in rows
         ]
+        # Surface techniques that actually worked on an overlapping stack ahead of
+        # the static reference corpus — write-back memory beats generic methodology.
+        return self._pattern_suggestions(unique_keywords) + reference_results
+
+    def record_pattern(
+        self,
+        vuln_class: str,
+        technique: str,
+        tech_stack: list[str],
+        *,
+        target: str = "",
+        payout: float = 0.0,
+        notes: str = "",
+    ) -> bool:
+        """Record a technique that worked, indexed by vuln class and tech stack.
+
+        This is the structured half of write-back memory: unlike a free-text
+        :meth:`add_lesson`, a pattern is keyed so :meth:`match_patterns` can recall
+        it for a new target with an overlapping stack. Deduplicates on
+        (vuln_class, technique, normalized tech_stack); returns False if known.
+        """
+        normalized = sorted({t.strip().lower() for t in tech_stack if t.strip()})
+        for (stack_json,) in self.conn.execute(
+            "SELECT tech_stack FROM patterns WHERE vuln_class = ? AND technique = ?",
+            (vuln_class, technique),
+        ).fetchall():
+            try:
+                if sorted(json.loads(stack_json)) == normalized:
+                    return False
+            except (json.JSONDecodeError, TypeError):
+                continue
+        self.conn.execute(
+            "INSERT INTO patterns "
+            "(vuln_class, technique, tech_stack, target, payout, notes, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                vuln_class,
+                technique,
+                json.dumps(normalized),
+                target,
+                float(payout),
+                notes,
+                datetime.now().isoformat(),
+            ),
+        )
+        self.conn.commit()
+        return True
+
+    def match_patterns(
+        self, *, vuln_class: str | None = None, tech_stack: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Recall recorded patterns by vuln class and/or overlapping tech stack.
+
+        ``tech_stack`` matches on ANY overlap — cross-target learning: a technique
+        found on a Flask+PostgreSQL target still surfaces for a new Flask target.
+        Results are ranked by payout (highest first), then recency.
+        """
+        query = {t.strip().lower() for t in (tech_stack or []) if t.strip()}
+        results: list[dict[str, Any]] = []
+        for row in self.conn.execute(
+            "SELECT vuln_class, technique, tech_stack, target, payout, notes, created_at "
+            "FROM patterns"
+        ).fetchall():
+            if vuln_class is not None and row["vuln_class"] != vuln_class:
+                continue
+            try:
+                stack = [str(t) for t in json.loads(row["tech_stack"])]
+            except (json.JSONDecodeError, TypeError):
+                stack = []
+            if query and not (query & {t.lower() for t in stack}):
+                continue
+            results.append(
+                {
+                    "vuln_class": row["vuln_class"],
+                    "technique": row["technique"],
+                    "tech_stack": stack,
+                    "target": row["target"],
+                    "payout": row["payout"],
+                    "notes": row["notes"],
+                    "created_at": row["created_at"],
+                }
+            )
+        results.sort(key=lambda p: (p["payout"], p["created_at"] or ""), reverse=True)
+        return results
+
+    def _pattern_suggestions(self, keywords: list[str], limit: int = 5) -> list[dict[str, Any]]:
+        """Shape patterns overlapping ``keywords`` as suggestion entries.
+
+        Entries are shape-compatible with the reference results
+        (filename/section/snippet/matched_keywords) and tagged ``source="pattern"``
+        so callers can tell learned patterns from static methodology docs.
+        """
+        keyword_set = {k.lower() for k in keywords}
+        suggestions: list[dict[str, Any]] = []
+        for pattern in self.match_patterns(tech_stack=keywords)[:limit]:
+            overlap = sorted(keyword_set & {t.lower() for t in pattern["tech_stack"]})
+            target = pattern["target"] or "a prior target"
+            suggestions.append(
+                {
+                    "filename": f"pattern::{pattern['vuln_class']}",
+                    "section": pattern["technique"],
+                    "snippet": pattern["notes"] or f"Worked on {target}.",
+                    "matched_keywords": overlap,
+                    "source": "pattern",
+                    "vuln_class": pattern["vuln_class"],
+                    "technique": pattern["technique"],
+                    "tech_stack": pattern["tech_stack"],
+                    "payout": pattern["payout"],
+                }
+            )
+        return suggestions
 
     def get_doc(self, filename: str) -> str | None:
         """Retrieve a full reference doc by filename.
