@@ -18,12 +18,15 @@ Individual tests:
     scanner.scan_endpoint("http://target/login", method="POST", data={"user": "test"})
 """
 
+from bugbounty_ctf.audit_log import AuditLog, AuditSummary
 from bugbounty_ctf.engine import ResponseDiff, SecurityScanner, TestResult
 from bugbounty_ctf.scope import ScopeGuard
 from bugbounty_ctf.skill_runner import SkillOrchestrator
 
 __version__ = "7.0.0"
 __all__ = [
+    "AuditLog",
+    "AuditSummary",
     "ResponseDiff",
     "ScopeGuard",
     "SecurityScanner",

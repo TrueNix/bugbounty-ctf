@@ -22,7 +22,8 @@ from urllib.parse import ParseResult, urljoin, urlparse
 import requests
 import urllib3
 
-from bugbounty_ctf.scope import ScopeGuard
+from bugbounty_ctf.audit_log import AuditLog
+from bugbounty_ctf.scope import OutOfScopeError, ScopeGuard
 
 if TYPE_CHECKING:
     # Type-only import: engine must not hard-depend on patterns at runtime
@@ -1185,6 +1186,7 @@ class SecurityScanner:
         respect_waf: bool = True,
         db: ScannerDB | None = None,
         scope: ScopeGuard | None = None,
+        audit_log: AuditLog | None = None,
         headers: dict[str, str] | None = None,
         verify: bool = False,
     ) -> None:
@@ -1196,6 +1198,7 @@ class SecurityScanner:
         self.base_url = base_url.rstrip("/")
         self.host = urlparse(base_url).hostname or "unknown"
         self.scope = scope
+        self.audit_log = audit_log
         self.session = session or requests.Session()
         self.verify = verify
         self.session.verify = verify
@@ -1380,6 +1383,33 @@ class SecurityScanner:
                         }
         return None
 
+    def _scope_check(self, method: str, url: str) -> None:
+        """Scope-check ``url`` and record the decision to the audit log, if attached.
+
+        Behaviour matches the previous inline ``self.scope.check(url)``: with no
+        scope configured nothing is enforced, and an out-of-scope URL still raises
+        :class:`OutOfScopeError`. The only addition is that the pass/fail/skip
+        decision is appended to the audit trail when an :class:`AuditLog` is set.
+        """
+        if self.scope is None:
+            self._record_scope(url, method, "skip")
+            return
+        try:
+            self.scope.check(url)
+        except OutOfScopeError:
+            self._record_scope(url, method, "fail")
+            raise
+        self._record_scope(url, method, "pass")
+
+    def _record_scope(self, url: str, method: str, decision: str) -> None:
+        """Best-effort audit write; audit I/O or validation never breaks a scan."""
+        if self.audit_log is None:
+            return
+        try:
+            self.audit_log.log_request(url, method, decision)
+        except (OSError, ValueError):
+            pass
+
     def _make_request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         """Make HTTP request with timing, retry on transient failure, and pacing.
 
@@ -1388,8 +1418,7 @@ class SecurityScanner:
         is deliberately *not* caught here, so it surfaces to the caller rather
         than being masked as a failed request.
         """
-        if self.scope is not None:
-            self.scope.check(url)
+        self._scope_check(method, url)
 
         request_kwargs = dict(kwargs)
         allow_redirects = request_kwargs.pop("allow_redirects", True)
@@ -1427,7 +1456,7 @@ class SecurityScanner:
                         redirect_url = next_request.url
                         if redirect_url is None:
                             raise requests.exceptions.MissingSchema("Redirect target is missing")
-                        self.scope.check(redirect_url)
+                        self._scope_check(method, redirect_url)
                         history.append(response)
                         redirect_settings = self.session.merge_environment_settings(
                             redirect_url,
