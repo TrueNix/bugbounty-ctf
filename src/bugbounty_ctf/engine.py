@@ -7,6 +7,7 @@ orchestration layer for automated endpoint scanning.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -1405,10 +1406,8 @@ class SecurityScanner:
         """Best-effort audit write; audit I/O or validation never breaks a scan."""
         if self.audit_log is None:
             return
-        try:
+        with contextlib.suppress(OSError, ValueError):
             self.audit_log.log_request(url, method, decision)
-        except (OSError, ValueError):
-            pass
 
     def _make_request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         """Make HTTP request with timing, retry on transient failure, and pacing.

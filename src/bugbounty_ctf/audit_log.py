@@ -162,7 +162,7 @@ class AuditLog:
     ) -> dict[str, object]:
         if not isinstance(url, str) or not url.strip():
             raise AuditError("url must be a non-empty string")
-        normalized_method = method.upper() if isinstance(method, str) else ""
+        normalized_method = method.upper()
         if normalized_method not in VALID_METHODS:
             raise AuditError(f"method must be one of {sorted(VALID_METHODS)}, got {method!r}")
         if scope_check not in VALID_SCOPE_CHECKS:
