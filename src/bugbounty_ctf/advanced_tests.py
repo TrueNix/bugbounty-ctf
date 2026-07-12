@@ -29,6 +29,7 @@ from typing import Any, Final, Protocol
 import requests
 
 from bugbounty_ctf.engine import SecurityScanner
+from bugbounty_ctf.rotation import prune_files
 
 # ============================================================================
 # Defense Detection
@@ -1825,15 +1826,21 @@ def save_report(
     format: str = "markdown",
 ) -> str:
     """Save a report to disk and return the path."""
+    default_dir: str | None = None
     if output_path is None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         ext = "json" if format == "json" else "md"
-        output_path = os.path.expanduser(f"~/.hermes/security_reports/report_{ts}.{ext}")
+        default_dir = os.path.expanduser("~/.hermes/security_reports")
+        output_path = os.path.join(default_dir, f"report_{ts}.{ext}")
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     report = generate_report(scanner_or_findings, format=format)
     with open(output_path, "w") as f:
         f.write(report)
+    # Bound the default report directory so it doesn't accumulate forever. Only the
+    # auto-generated location is pruned; an explicit output_path is left untouched.
+    if default_dir is not None:
+        prune_files(default_dir, "report_*", keep=50)
     print(f"[*] Report saved to {output_path}")
     return output_path
 
