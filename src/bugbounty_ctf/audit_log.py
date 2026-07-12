@@ -31,6 +31,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
+from bugbounty_ctf.rotation import rotate_jsonl
+
 SCHEMA_VERSION = 1
 DEFAULT_PATH = Path("~/.hermes/audit.jsonl")
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
@@ -191,7 +193,7 @@ class AuditLog:
 
     def _append(self, entry: dict[str, object]) -> None:
         line = (json.dumps(entry, separators=(",", ":")) + "\n").encode("utf-8")
-        self._rotate_if_needed()
+        rotate_jsonl(self.path, max_bytes=self.max_bytes, keep=self.keep_backups)
         fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
@@ -203,37 +205,3 @@ class AuditLog:
                 fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
-
-    def _rotate_if_needed(self) -> bool:
-        try:
-            oversized = self.path.stat().st_size >= self.max_bytes
-        except FileNotFoundError:
-            return False
-        if not oversized:
-            return False
-        fd = os.open(str(self.path), os.O_RDONLY | os.O_CREAT, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            try:
-                if self.path.stat().st_size < self.max_bytes:
-                    return False  # another process rotated first
-            except FileNotFoundError:
-                return False
-            self._rotate()
-            return True
-        finally:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            finally:
-                os.close(fd)
-
-    def _rotate(self) -> None:
-        oldest = self.path.with_suffix(self.path.suffix + f".{self.keep_backups}")
-        if oldest.exists():
-            oldest.unlink()
-        for index in range(self.keep_backups - 1, 0, -1):
-            src = self.path.with_suffix(self.path.suffix + f".{index}")
-            dst = self.path.with_suffix(self.path.suffix + f".{index + 1}")
-            if src.exists():
-                os.replace(str(src), str(dst))
-        os.replace(str(self.path), str(self.path.with_suffix(self.path.suffix + ".1")))
