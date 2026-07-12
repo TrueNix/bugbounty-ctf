@@ -59,9 +59,7 @@ def test_session_id_from_argument_and_environment(
         ("", "GET", "pass"),
     ],
 )
-def test_validation_fails_closed(
-    tmp_path: Path, url: str, method: str, scope_check: str
-) -> None:
+def test_validation_fails_closed(tmp_path: Path, url: str, method: str, scope_check: str) -> None:
     log = AuditLog(tmp_path / "audit.jsonl")
     with pytest.raises(AuditError):
         log.log_request(url, method, scope_check)
