@@ -50,6 +50,16 @@ The memory system only works if you USE it. Running the same failed command
 10 times wastes the session and proves you're not checking memory. Check.
 Record. Pivot.
 
+**Pattern memory — record what WORKED, recall it for similar stacks.** Dead-ends
+record what failed; patterns record what succeeded, keyed by tech stack, so the
+next target with an overlapping stack benefits:
+1. Before crafting an approach on a new target, recall past wins:
+   `KnowledgeBase().suggest_methodology(["<detected-tech>", ...])` — entries tagged
+   `source="pattern"` are techniques that already worked on a similar stack and are
+   surfaced ahead of the static reference docs. Check them first.
+2. After you CONFIRM a finding, record the technique so it's recalled later:
+   `KnowledgeBase().record_pattern(vuln_class="<class>", technique="<what worked>", tech_stack=["<tech>", ...], target=TARGET, payout=<amount>, notes="<concise>")`.
+
 ## Agent-owned loop (when running terminal commands directly)
 
 When you're running commands directly (curl, python, nmap) rather than through
@@ -949,12 +959,20 @@ Many CTF labs are **vulnerability identification exercises**, not flag-capture:
 
 ## Bug Bounty Methodology
 
-1. **Scope check:** Only test in-scope domains. Enforce it mechanically — wrap the scanner in a `ScopeGuard` so out-of-scope requests hard-fail instead of relying on discipline:
+1. **Scope check:** Only test in-scope domains. Enforce it mechanically — wrap the scanner in a `ScopeGuard` so out-of-scope requests hard-fail instead of relying on discipline. On HackerOne, pull the program's authoritative scope instead of hand-typing it, and attach an `AuditLog` so every request's scope decision is recorded — proof you stayed in-bounds:
    ```python
    from bugbounty_ctf import SecurityScanner, ScopeGuard
+   from bugbounty_ctf.audit_log import AuditLog
+   from bugbounty_ctf.hackerone import HackerOneClient
+
+   # Allowlist — hand-built…
    scope = ScopeGuard(["*.example.com", "api.example.org"])  # exact, wildcard, or apex
-   scanner = SecurityScanner("https://app.example.com/", scope=scope)
+   # …or ingested from a HackerOne program's structured scopes (needs H1_USERNAME / H1_API_TOKEN):
+   scope = HackerOneClient().scope_guard("example-program")  # add bounty_only=True for paid assets
+
+   scanner = SecurityScanner("https://app.example.com/", scope=scope, audit_log=AuditLog())
    # Any request to a host outside the allowlist raises OutOfScopeError.
+   # When done: AuditLog().summary() → clean=True proves no out-of-scope requests were made.
    ```
 2. **Surface mapping:** Every input point — params, headers, cookies, uploads, API endpoints.
 3. **Vulnerability testing:** Follow the order in Step 1.
