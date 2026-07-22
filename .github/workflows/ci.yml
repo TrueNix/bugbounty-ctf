@@ -15,7 +15,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install "ruff==0.15.22" "mypy==2.3.0"
+        # Install the package so mypy resolves runtime dependency types
+        # (e.g. requests) instead of falling back to Any, matching local runs.
+        run: pip install -e . "ruff==0.15.22" "mypy==2.3.0"
       - name: Run ruff
         run: ruff check src/ tests/
       - name: Run ruff format check
