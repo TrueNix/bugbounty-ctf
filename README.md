@@ -26,12 +26,22 @@ Bundled SecLists payload wordlists ship inside the package
 (`bugbounty_ctf/wordlists/`), so they are available offline after install — no
 download required.
 
-### Use as a Hermes skill
+### Install the Hermes skill from GitHub
 
-A bare `git clone` only gives Hermes the methodology layer (`SKILL.md`,
-`references/`, `templates/`). The Python toolkit
-(`from bugbounty_ctf import ...`) must be installed to be importable. Use the
-installer:
+Installing from a `git clone` gives you both layers of the skill: the
+methodology (`SKILL.md`, `references/`, `templates/`) **and** the importable
+Python toolkit (`from bugbounty_ctf import ...`). A bare clone alone only gives
+the methodology, so always run the installer.
+
+**Prerequisites**
+
+- **Python 3.10+** and `pip` (`python3 --version`).
+- **git** (to clone and, optionally, to auto-update).
+- **A container runtime (Docker)** — only needed for the `kalibox` container
+  used to run offensive/privileged tooling. The toolkit installs and imports
+  fine without it; see [kalibox runtime requirements](#kalibox-runtime-requirements).
+
+**1. Clone into your Hermes skills directory and install**
 
 ```bash
 git clone https://github.com/TrueNix/bugbounty-ctf \
@@ -40,12 +50,59 @@ cd ~/.hermes/skills/red-teaming/bugbounty-ctf
 ./install.sh            # editable pip install + register the skill (symlink, stays in sync)
 ```
 
+`./install.sh` does everything required: it runs an editable `pip install` (which
+pulls the one runtime dependency, `requests`, and ships the SecLists wordlists +
+bundled CVE DB as package data), registers the skill directory, and verifies the
+import. Installer flags:
+
 - **Default (symlink)** — the skill directory points at the repo, so it never
   drifts from your working copy.
 - **`./install.sh --copy`** — copies files into the skill directory instead and
   installs a git `post-commit` hook that re-mirrors them, so the copy stays
   drift-free too. `make sync-skill` re-mirrors on demand.
 - `HERMES_SKILL_DIR=/path ./install.sh` overrides the skill location.
+
+**2. Add optional feature extras (only if you need them)**
+
+The base install covers all web/recon/OSINT/AWS/knowledge-base functionality.
+Some domains need extra libraries — install them into the same environment from
+the cloned directory:
+
+```bash
+pip install -e '.[pwn]'    # binary exploitation (pwntools)
+pip install -e '.[yaml]'   # YAML deserialization testing
+pip install -e '.[pdf]'    # PDF report/file ingestion
+pip install -e '.[embed]'  # semantic embeddings for the knowledge base
+pip install -e '.[ner]'    # spaCy entity extraction
+pip install -e '.[dev]'    # test/lint/type-check toolchain (contributors)
+
+# Or several at once:
+pip install -e '.[pwn,yaml,pdf]'
+```
+
+External binaries used by some domains (`nmap`, `radare2`, `binwalk`,
+`exiftool`, `steghide`, `nuclei`, …) are invoked as system tools — install them
+via your OS package manager or run them inside `kalibox`, which provisions them
+for you.
+
+**3. Fetch the public knowledge brain (optional but recommended)**
+
+The toolkit can enrich hunts with the separately-published, checksum-verified
+[`bugbounty-brain`](https://github.com/TrueNix/bugbounty-brain) knowledge
+release. Install/update it once:
+
+```bash
+kalibox brain update      # download + SHA-256-verify the latest brain release
+kalibox brain status      # show the installed version
+```
+
+**4. Verify the install**
+
+```bash
+python -c "from bugbounty_ctf import SecurityScanner, ScopeGuard; print('import OK')"
+kalibox --help            # CLI entry point is on PATH
+make check                # optional full gate: ruff + mypy strict + pytest
+```
 
 **Auto-update from GitHub on start.** Add `--autosync` (or `make install-autosync`)
 to register a Hermes `on_session_start` hook that pulls the latest `main` from
@@ -60,8 +117,6 @@ fast-forwards a **clean checkout on `main`**, is throttled (one network check
 per hour, tunable via `BBCTF_AUTOSYNC_THROTTLE`), and never blocks the session
 (always exits 0). Hermes asks for one-time consent the first time it fires.
 Remove it with `python3 scripts/register_autosync_hook.py --remove`.
-
-`make check` runs the full gate (ruff + mypy strict + pytest).
 
 ### kalibox runtime requirements
 
