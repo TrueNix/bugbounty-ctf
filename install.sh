@@ -60,4 +60,14 @@ if [ "$AUTOSYNC" = "1" ]; then
 fi
 
 python -c "from bugbounty_ctf import SecurityScanner; print('[+] import OK')"
+
+# kalibox drives a Kali container that is pulled/provisioned at runtime — it is
+# not installed here. Surface the runtime prerequisite so it is not a surprise.
+if command -v docker >/dev/null 2>&1; then
+    echo "[+] docker found — 'kalibox up' will pull kalilinux/kali-rolling (~1 GB) on first run."
+else
+    echo "[!] docker not found on PATH. The Python toolkit works without it, but the"
+    echo "    kalibox container ('kalibox up', privileged Kali) needs a container runtime."
+fi
+
 echo "[+] Done."

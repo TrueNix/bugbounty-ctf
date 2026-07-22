@@ -63,6 +63,34 @@ Remove it with `python3 scripts/register_autosync_hook.py --remove`.
 
 `make check` runs the full gate (ruff + mypy strict + pytest).
 
+### kalibox runtime requirements
+
+The Python package (`kalibox` command, `KaliBox` class) ships with this repo and
+is installed by `pip install` / `install.sh`. The **Kali container it drives is
+not bundled** — it is pulled and provisioned at runtime, so nothing about the
+container lives in this repository or its releases.
+
+- **Docker (or a compatible runtime) must be on `PATH`.** Without it, kalibox
+  raises `DockerNotFoundError`; the rest of the toolkit still works.
+- **First `kalibox up` pulls `kalilinux/kali-rolling`** (~1 GB from Docker Hub)
+  and, once, `apt-get install`s the baseline offensive toolset (nmap, smbclient,
+  hydra, gobuster, ffuf, seclists, …). A marker file makes this idempotent, so
+  later runs are fast.
+- **The container runs `--privileged --network host`** so NFS mounts work in its
+  own namespace and it sees your VPN/engagement network. This is an operational
+  convenience and a disposable namespace, **not** a security sandbox: privileged
+  + host-network access is equivalent to host root. Run it only on a machine you
+  control, and `kalibox destroy` it when done.
+- Loot written under `/work` in the container is bind-mounted to
+  `~/.hermes/kalibox/work` on the host.
+
+```bash
+kalibox up                          # first run: pull Kali + install the toolset (once)
+kalibox nmap -sCV -p- 10.129.33.77  # run any offensive tool inside the box
+kalibox status                      # container state
+kalibox destroy                     # tear it down
+```
+
 ## Quick Start
 
 ```python
