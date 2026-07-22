@@ -103,4 +103,6 @@ branch = true
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 45
+# Actual coverage is ~81%; keep a floor just below it so regressions fail CI
+# while leaving headroom for minor per-version fluctuation.
+fail_under = 78
