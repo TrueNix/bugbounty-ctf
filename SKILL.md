@@ -83,6 +83,62 @@ You MUST:
 | **OSINT** | Open-source intelligence gathering | Google dorks, metadata, geolocation, social engineering |
 | **Misc** | Everything else | Programming puzzles, encoding, logic, trivia |
 
+## Step 0.0: Ensure the Toolkit Is Installed (do this first)
+
+This skill is both methodology **and** a Python toolkit. Every later step
+imports `bugbounty_ctf`, so before anything else, confirm the package is
+importable and install it from this repo if it is not. A bare checkout ships the
+code but does **not** make it importable until installed.
+
+**1. Check whether it is already installed:**
+
+```bash
+python3 -c "import bugbounty_ctf; print('toolkit OK', bugbounty_ctf.__file__)"
+```
+
+**2. If that fails, install it from the skill directory** (editable install +
+skill registration; pulls the one runtime dep `requests` and ships the bundled
+wordlists + CVE DB as package data):
+
+```bash
+cd "${HERMES_SKILL_DIR:-$HOME/.hermes/skills/red-teaming/bugbounty-ctf}"
+./install.sh
+```
+
+If the repo is not cloned yet:
+
+```bash
+git clone https://github.com/TrueNix/bugbounty-ctf \
+    "${HERMES_SKILL_DIR:-$HOME/.hermes/skills/red-teaming/bugbounty-ctf}"
+cd "${HERMES_SKILL_DIR:-$HOME/.hermes/skills/red-teaming/bugbounty-ctf}"
+./install.sh
+```
+
+**3. Add extras only when a task needs them** (base install covers
+web/recon/OSINT/AWS/knowledge-base):
+
+```bash
+pip install -e '.[pwn]'   # binary exploitation (pwntools) — for pwn challenges
+pip install -e '.[yaml]'  # YAML deserialization testing
+pip install -e '.[pdf]'   # PDF ingestion / reporting
+```
+
+**4. Container + knowledge (when the task calls for them):**
+
+- Offensive/privileged tooling runs in `kalibox` — see
+  [Step 0.4](#step-04-run-attacks-inside-kalibox--never-use-host-sudo). First
+  `kalibox up` pulls Kali and provisions the toolset; Docker must be on `PATH`.
+- Pull the checksum-verified public knowledge brain once with
+  `kalibox brain update` (status via `kalibox brain status`).
+
+**5. Re-verify before proceeding:**
+
+```bash
+python3 -c "from bugbounty_ctf import SecurityScanner, ScopeGuard; print('import OK')"
+```
+
+Only continue once the import succeeds.
+
 ## Step 0: Auto-Detect Challenge Type
 
 Before diving in, let the tooling tell you what you're dealing with:
