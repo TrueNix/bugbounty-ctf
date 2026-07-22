@@ -101,6 +101,16 @@ def response_time(resp: requests.Response) -> float:
         return 0.0
 
 
+def set_response_time(resp: requests.Response, seconds: float) -> None:
+    """Stamp a measured response time onto a response.
+
+    ``requests.Response`` has no ``response_time`` field, so this attaches it
+    dynamically (read back by :func:`response_time`). Assigning via ``setattr``
+    keeps the dynamic attribute out of static type checking.
+    """
+    setattr(resp, "response_time", seconds)  # noqa: B010
+
+
 class ResponseDiff:
     """Compare two HTTP responses and identify meaningful differences."""
 
@@ -1471,7 +1481,7 @@ class SecurityScanner:
                             **redirect_settings,
                         )
                     response.history = history
-                response.response_time = time.time() - start
+                set_response_time(response, time.time() - start)
                 return response
             except requests.exceptions.RequestException:
                 if attempt == 0:
@@ -1480,12 +1490,12 @@ class SecurityScanner:
                 response = requests.Response()
                 response.status_code = 0
                 response._content = b"Request failed: timeout or connection error"
-                response.response_time = time.time() - start
+                set_response_time(response, time.time() - start)
                 return response
         response = requests.Response()
         response.status_code = 0
         response._content = b"Request failed: retries exhausted"
-        response.response_time = 0.0
+        set_response_time(response, 0.0)
         return response
 
     def get_baseline(self, method: str, url: str, **kwargs: Any) -> requests.Response:

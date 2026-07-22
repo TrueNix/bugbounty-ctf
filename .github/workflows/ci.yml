@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install ruff mypy
+        run: pip install "ruff==0.15.22" "mypy==2.3.0"
       - name: Run ruff
         run: ruff check src/ tests/
       - name: Run ruff format check

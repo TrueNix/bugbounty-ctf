@@ -483,9 +483,13 @@ def update_cve_db(
 
         get = fetcher or requests.get
         headers = {"apiKey": api_key} if api_key else {}
+        params: dict[str, str | int] = {
+            "keywordSearch": product,
+            "resultsPerPage": 50,
+        }
         resp = get(
             _NVD_URL,
-            params={"keywordSearch": product, "resultsPerPage": 50},
+            params=params,
             headers=headers,
             timeout=20,
         )

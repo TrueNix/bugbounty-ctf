@@ -199,7 +199,13 @@ class LangflowProbe:
         cookies: Mapping[str, str] | None = None,
         json: JsonValue | None = None,
     ) -> ResponseLike:
-        response = self._session.request(method, url, timeout=timeout, cookies=cookies, json=json)
+        response = self._session.request(
+            method,
+            url,
+            timeout=timeout,
+            cookies=dict(cookies) if cookies is not None else None,
+            json=json,
+        )
         return requests_response(response)
 
     def _request(

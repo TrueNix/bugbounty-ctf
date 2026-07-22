@@ -288,10 +288,10 @@ class OSINTToolkit:
                     print(f"  [wayback] Found {len(results)} historical URLs")
 
                     interesting = [
-                        r
-                        for r in results
+                        entry
+                        for entry in results
                         if any(
-                            kw in r["url"].lower()
+                            kw in entry["url"].lower()
                             for kw in [
                                 "flag",
                                 "secret",
@@ -310,12 +310,12 @@ class OSINTToolkit:
                             OSINTFinding(
                                 source="wayback",
                                 finding_type="interesting_urls",
-                                value=str([r["url"] for r in interesting[:10]]),
+                                value=str([hit["url"] for hit in interesting[:10]]),
                                 details={"interesting_count": len(interesting)},
                             )
                         )
-                        for r in interesting[:5]:
-                            print(f"    [!] {r['url']}")
+                        for hit in interesting[:5]:
+                            print(f"    [!] {hit['url']}")
         except Exception as e:
             print(f"  [-] Wayback error: {e}")
 

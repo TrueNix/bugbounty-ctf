@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 
 
 class FeedResponse(Protocol):
-    text: str
+    @property
+    def text(self) -> str: ...
 
     def raise_for_status(self) -> None: ...
 
@@ -182,14 +183,13 @@ def ingest_attack_techniques(
 
 
 def _default_fetcher(url: str) -> FeedResponse:
-    response: FeedResponse = requests.get(
+    return requests.get(
         url,
         timeout=REQUEST_TIMEOUT_SECONDS,
         headers={
             "User-Agent": "bugbounty-ctf/1.0 (security research; +https://github.com/TrueNix/bugbounty-ctf)"
         },
     )
-    return response
 
 
 def _add_ioc_summary(kb: KnowledgeBase, *, title: str, body: str, key: str) -> None:
